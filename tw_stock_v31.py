@@ -1,5 +1,6 @@
 
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -9,14 +10,39 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v31")
-st.title("🚀 台股短線系統 v31")
+st.set_page_config(layout="wide", page_title="台股短線系統 v38")
+st.title("🚀 台股短線系統 v38")
 
-FAVORITES_FILE = Path("stock_favorites.json")
-SNAPSHOT_FILE = Path("stock_snapshots.json")
-TRADES_FILE = Path("trades_v13.json")
 NAMES_FILE = Path("tw_stock_names.json")
 MAX_SNAPSHOTS = 5000
+USERS_FILE = Path("users_list.json")
+DEFAULT_USERS = ["承佑", "測試"]
+
+def load_users():
+    users = load_json_list(USERS_FILE)
+    if not users:
+        return DEFAULT_USERS.copy()
+    clean = [str(x).strip() for x in users if str(x).strip()]
+    return clean if clean else DEFAULT_USERS.copy()
+
+def save_users(users):
+    clean = []
+    seen = set()
+    for u in users:
+        name = str(u).strip()
+        if name and name not in seen:
+            clean.append(name)
+            seen.add(name)
+    save_json_list(USERS_FILE, clean)
+
+def safe_user_key(user_name: str) -> str:
+    text = str(user_name).strip()
+    if not text:
+        text = "default"
+    return re.sub(r"[^0-9A-Za-z_\-一-龥]+", "_", text)
+
+def user_file(prefix: str, user_name: str) -> Path:
+    return Path(f"{prefix}_{safe_user_key(user_name)}.json")
 
 builtin_stock_names = {
     "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2303.TW": "聯電",
@@ -65,6 +91,15 @@ def load_json_list(path: Path):
 def save_json_list(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def current_favorites_file():
+    return user_file("stock_favorites", st.session_state.get("current_user", DEFAULT_USERS[0]))
+
+def current_snapshots_file():
+    return user_file("stock_snapshots", st.session_state.get("current_user", DEFAULT_USERS[0]))
+
+def current_trades_file():
+    return user_file("trades_v13", st.session_state.get("current_user", DEFAULT_USERS[0]))
+
 
 def ensure_names_file():
     if not NAMES_FILE.exists():
@@ -86,27 +121,22 @@ def load_name_map():
 
 
 def load_favorites():
-    return [str(x) for x in load_json_list(FAVORITES_FILE)]
-
+    return [str(x) for x in load_json_list(current_favorites_file())]
 
 def save_favorites(favorites):
-    save_json_list(FAVORITES_FILE, sorted(list(set(favorites))))
-
+    save_json_list(current_favorites_file(), sorted(list(set(favorites))))
 
 def load_snapshots():
-    return load_json_list(SNAPSHOT_FILE)[-MAX_SNAPSHOTS:]
-
+    return load_json_list(current_snapshots_file())[-MAX_SNAPSHOTS:]
 
 def save_snapshots(data):
-    save_json_list(SNAPSHOT_FILE, data[-MAX_SNAPSHOTS:])
-
+    save_json_list(current_snapshots_file(), data[-MAX_SNAPSHOTS:])
 
 def load_trades():
-    return load_json_list(TRADES_FILE)
-
+    return load_json_list(current_trades_file())
 
 def save_trades(data):
-    save_json_list(TRADES_FILE, data)
+    save_json_list(current_trades_file(), data)
 
 
 def display_name(code: str, name_map: dict):
@@ -508,6 +538,56 @@ def find_latest_snapshot_for_stock(stock_code: str):
             return s
     return None
 
+def get_current_plan_for_stock(stock_code: str):
+    q = stock_code.upper()
+    results = st.session_state.get("results_data", [])
+    for row in results:
+        code = str(row.get("_code", "")).upper()
+        name_text = str(row.get("股票", "")).upper()
+        if code == q or code.startswith(q + ".") or q.startswith(code.split(".")[0]) or name_text.startswith(q):
+            return {
+                "計畫來源": "目前分析",
+                "計畫進場": row.get("進場", ""),
+                "計畫停損": row.get("停損", ""),
+                "計畫短壓": row.get("短期壓力", ""),
+                "計畫中繼": row.get("中繼目標", ""),
+                "計畫突破": row.get("突破目標", ""),
+                "計畫風報比": row.get("風報比", ""),
+                "計畫結論": row.get("結論", ""),
+                "計畫訊號": row.get("交易訊號", ""),
+            }
+    latest_snap = find_latest_snapshot_for_stock(q)
+    if latest_snap:
+        return {
+            "計畫來源": f'最新{latest_snap.get("類型","快照")}',
+            "計畫進場": latest_snap.get("進場", ""),
+            "計畫停損": latest_snap.get("停損", ""),
+            "計畫短壓": latest_snap.get("短期壓力", ""),
+            "計畫中繼": latest_snap.get("中繼目標", ""),
+            "計畫突破": latest_snap.get("突破目標", ""),
+            "計畫風報比": latest_snap.get("風報比", ""),
+            "計畫結論": latest_snap.get("結論", ""),
+            "計畫訊號": latest_snap.get("交易訊號", ""),
+        }
+    return None
+
+
+def get_latest_pre_post_snapshot(stock_code: str):
+    snaps = load_snapshots()
+    q = stock_code.upper()
+    matched = []
+    for s in snaps:
+        code = str(s.get("股票代碼", "")).upper()
+        stock_text = str(s.get("股票", "")).upper()
+        if code == q or code.startswith(q + ".") or q.startswith(code.split(".")[0]) or stock_text.startswith(q):
+            matched.append(s)
+    if not matched:
+        return None, None
+    matched = sorted(matched, key=lambda x: x.get("時間", ""), reverse=True)
+    pre = next((x for x in matched if x.get("類型") == "盤前"), None)
+    post = next((x for x in matched if x.get("類型") == "盤後"), None)
+    return pre, post
+
 
 def pair_trades(trades):
     grouped, closed, open_pos = {}, [], []
@@ -525,14 +605,54 @@ def pair_trades(trades):
                     matched = min(qty_to_close, buy["剩餘數量"])
                     pnl = (r["價格"] - buy["價格"]) * matched
                     ret = ((r["價格"] / buy["價格"]) - 1) * 100 if buy["價格"] else 0
-                    closed.append({"股票": code, "買進時間": buy["時間"], "賣出時間": r["時間"], "買進價": buy["價格"], "賣出價": r["價格"], "數量": matched, "損益": round(pnl, 2), "報酬率%": round(ret, 2)})
+                    closed.append({
+                        "股票": code, "買進時間": buy["時間"], "賣出時間": r["時間"],
+                        "買進價": buy["價格"], "賣出價": r["價格"], "數量": matched,
+                        "損益": round(pnl, 2), "報酬率%": round(ret, 2),
+                        "計畫來源": buy.get("計畫來源",""),
+                        "計畫進場": buy.get("計畫進場",""),
+                        "計畫停損": buy.get("計畫停損",""),
+                        "計畫短壓": buy.get("計畫短壓",""),
+                        "計畫中繼": buy.get("計畫中繼",""),
+                        "計畫突破": buy.get("計畫突破",""),
+                        "計畫風報比": buy.get("計畫風報比",""),
+                        "計畫結論": buy.get("計畫結論",""),
+                        "計畫訊號": buy.get("計畫訊號",""),
+                        "盤前快照時間": buy.get("盤前快照時間",""),
+                        "盤前快照結論": buy.get("盤前快照結論",""),
+                        "盤前快照訊號": buy.get("盤前快照訊號",""),
+                        "盤前快照風報比": buy.get("盤前快照風報比",""),
+                        "盤後快照時間": buy.get("盤後快照時間",""),
+                        "盤後快照結論": buy.get("盤後快照結論",""),
+                        "盤後快照訊號": buy.get("盤後快照訊號",""),
+                        "盤後快照風報比": buy.get("盤後快照風報比",""),
+                    })
                     buy["剩餘數量"] -= matched
                     qty_to_close -= matched
                     if buy["剩餘數量"] == 0:
                         buys.pop(0)
         for b in buys:
             if b["剩餘數量"] > 0:
-                open_pos.append({"股票": code, "買進時間": b["時間"], "買進價": b["價格"], "剩餘數量": b["剩餘數量"]})
+                open_pos.append({
+                    "股票": code, "買進時間": b["時間"], "買進價": b["價格"], "剩餘數量": b["剩餘數量"],
+                    "計畫來源": b.get("計畫來源",""),
+                    "計畫進場": b.get("計畫進場",""),
+                    "計畫停損": b.get("計畫停損",""),
+                    "計畫短壓": b.get("計畫短壓",""),
+                    "計畫中繼": b.get("計畫中繼",""),
+                    "計畫突破": b.get("計畫突破",""),
+                    "計畫風報比": b.get("計畫風報比",""),
+                    "計畫結論": b.get("計畫結論",""),
+                    "計畫訊號": b.get("計畫訊號",""),
+                    "盤前快照時間": b.get("盤前快照時間",""),
+                    "盤前快照結論": b.get("盤前快照結論",""),
+                    "盤前快照訊號": b.get("盤前快照訊號",""),
+                    "盤前快照風報比": b.get("盤前快照風報比",""),
+                    "盤後快照時間": b.get("盤後快照時間",""),
+                    "盤後快照結論": b.get("盤後快照結論",""),
+                    "盤後快照訊號": b.get("盤後快照訊號",""),
+                    "盤後快照風報比": b.get("盤後快照風報比",""),
+                })
     return pd.DataFrame(closed), pd.DataFrame(open_pos)
 
 
@@ -620,6 +740,57 @@ def build_favorites_panel(favs, market_score_adj, name_map):
     df = pd.DataFrame(rows).sort_values(["_rank", "風報比"], ascending=[False, False])
     return df
 
+
+def download_intraday(symbol: str):
+    try:
+        t = yf.Ticker(symbol)
+        df = t.history(period="1d", interval="5m", auto_adjust=False)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.reset_index()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def make_intraday_figure(df_intra: pd.DataFrame, row: pd.Series):
+    fig = go.Figure()
+    if df_intra is None or df_intra.empty:
+        fig.update_layout(
+            template="plotly_dark",
+            height=420 if st.session_state.get("mobile_mode", False) else 520,
+            title="當日走勢圖（目前抓不到盤中資料）",
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        return fig
+
+    time_col = "Datetime" if "Datetime" in df_intra.columns else df_intra.columns[0]
+    vol_series = df_intra["Volume"] if "Volume" in df_intra.columns else pd.Series([0]*len(df_intra))
+    close_series = df_intra["Close"] if "Close" in df_intra.columns else pd.Series([0]*len(df_intra))
+
+    fig.add_trace(go.Scatter(
+        x=df_intra[time_col], y=close_series,
+        mode="lines", name="當日價格"
+    ))
+    fig.add_trace(go.Bar(
+        x=df_intra[time_col], y=vol_series / 1000,
+        name="分時量(張)", yaxis="y2", opacity=0.4
+    ))
+
+    prev_close = row["收盤"] if "收盤" in row else None
+    if prev_close:
+        fig.add_hline(y=float(prev_close), line_dash="dot", annotation_text="參考價")
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=420 if st.session_state.get("mobile_mode", False) else 520,
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(orientation="h"),
+        yaxis=dict(title="價格"),
+        yaxis2=dict(title="分時量(張)", overlaying="y", side="right", showgrid=False),
+        xaxis=dict(title="")
+    )
+    return fig
+
 def make_candle_figure(df: pd.DataFrame, row: pd.Series):
     show_df = df.tail(90).copy()
     fig = make_subplots(
@@ -698,8 +869,67 @@ if "preset_strategy" not in st.session_state:
     st.session_state.preset_strategy = "none"
 if "mobile_mode" not in st.session_state:
     st.session_state.mobile_mode = True
+if "user_list" not in st.session_state:
+    st.session_state.user_list = load_users()
+if "current_user" not in st.session_state:
+    st.session_state.current_user = st.session_state.user_list[0] if st.session_state.user_list else DEFAULT_USERS[0]
 
 with st.sidebar:
+    st.header("👤 使用者")
+    user_options = st.session_state.user_list if st.session_state.user_list else DEFAULT_USERS.copy()
+    current_idx = user_options.index(st.session_state.current_user) if st.session_state.current_user in user_options else 0
+    chosen_user = st.selectbox("選擇使用者", user_options, index=current_idx)
+
+    if chosen_user != st.session_state.current_user:
+        st.session_state.current_user = chosen_user
+        st.session_state.favorites = load_favorites()
+        st.session_state.results_data = []
+        st.session_state.selected_code = None
+        st.session_state.analysis_mode = "idle"
+        st.rerun()
+
+    with st.expander("新增使用者", expanded=False):
+        new_user = st.text_input("輸入新使用者名稱", key="new_user_name")
+        if st.button("建立使用者", use_container_width=True):
+            name = str(new_user).strip()
+            if not name:
+                st.warning("請先輸入使用者名稱。")
+            elif name in user_options:
+                st.warning("這個使用者已存在。")
+            else:
+                user_options.append(name)
+                save_users(user_options)
+                st.session_state.user_list = load_users()
+                st.session_state.current_user = name
+                st.session_state.favorites = load_favorites()
+                st.session_state.results_data = []
+                st.session_state.selected_code = None
+                st.session_state.analysis_mode = "idle"
+                st.success(f"已新增使用者：{name}")
+                st.rerun()
+
+    with st.expander("刪除使用者", expanded=False):
+        deletable_users = [u for u in user_options if u != st.session_state.current_user]
+        if deletable_users:
+            delete_user = st.selectbox("選擇要刪除的使用者", deletable_users, index=0, key="delete_user_name")
+            if st.button("刪除使用者", use_container_width=True):
+                target = str(delete_user).strip()
+                if target:
+                    updated_users = [u for u in user_options if u != target]
+                    save_users(updated_users)
+                    st.session_state.user_list = load_users()
+
+                    for prefix in ["stock_favorites", "stock_snapshots", "trades_v13"]:
+                        p = user_file(prefix, target)
+                        if p.exists():
+                            p.unlink()
+
+                    st.success(f"已刪除使用者：{target}")
+                    st.rerun()
+        else:
+            st.caption("目前沒有可刪除的其他使用者。")
+
+    st.caption(f"目前資料分流：{st.session_state.current_user}")
     st.header("⭐ 我的最愛")
     favs = st.session_state.favorites
     if favs:
@@ -729,6 +959,7 @@ tab1, tab2, tab3 = st.tabs(["📈 分析中心", "🕘 快照中心", "📒 交�
 
 
 with tab1:
+    st.caption(f"目前使用者：{st.session_state.current_user}")
     market_info = market_filter()
 
     top_a, top_b = st.columns([3, 1])
@@ -801,8 +1032,7 @@ with tab1:
 
         favs = st.session_state.favorites
         if favs:
-            with st.container(border=True):
-                st.markdown("### 我的最愛追蹤面板")
+            with st.expander("我的最愛追蹤面板", expanded=False):
                 fav_df = build_favorites_panel(favs, market_info["score_adj"], name_map)
                 if fav_df.empty:
                     st.caption("目前最愛股無法取得分析資料。")
@@ -891,7 +1121,7 @@ with tab1:
             }
             st.caption(f"目前預設策略：{preset_name_map.get(preset, '自訂')}")
 
-        with st.container(border=True):
+        with st.expander("盤前候選股面板", expanded=not st.session_state.mobile_mode):
             panel_df = filtered_df.copy()
             green_count = int((panel_df["趨勢燈號"] == "綠燈").sum()) if not panel_df.empty else 0
             volume_up_count = int((panel_df["量能變化"] == "量增").sum()) if not panel_df.empty else 0
@@ -928,7 +1158,7 @@ with tab1:
                             unsafe_allow_html=True
                         )
 
-        with st.container(border=True):
+        with st.expander("總表分析", expanded=not st.session_state.mobile_mode):
             st.markdown("### 總表分析")
             sort_c1, sort_c2 = st.columns([2, 3])
             sort_options = {
@@ -1030,7 +1260,7 @@ with tab1:
                 ("最新收盤", f'{row["收盤"]:.2f}'), ("短期支撐", f'{row["支撐"]:.2f}'), ("短期壓力", f'{row["短期壓力"]:.2f}'), ("突破目標", f'{row["突破目標"]:.2f}'),
                 ("建議進場", f'{row["進場"]:.2f}'), ("停損", f'{row["停損"]:.2f}'), ("中繼目標", f'{row["中繼目標"]:.2f}'), ("風報比", f'{row["風報比"]:.2f}'),
                 ("KD-K", f'{row["KD_K"]:.1f}'), ("KD-D", f'{row["KD_D"]:.1f}'), ("5日乖離率", f'{row["乖離率5日"]:.2f}%'), ("量比(5日)", f'{row["量比5日"]:.2f}'),
-                ("今日成交量", f'{int(row["成交量"]):,}'), ("昨日成交量", f'{int(row["昨量"]):,}'), ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%')
+                ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'), ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'), ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%')
             ]
             cols_per_row = 2 if st.session_state.mobile_mode else 4
             for i in range(0, len(metric_pairs), cols_per_row):
@@ -1042,7 +1272,12 @@ with tab1:
             render_signal_lights(row)
 
             with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
-                st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
+                chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
+                if chart_mode == "日K圖":
+                    st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
+                else:
+                    intra_df = download_intraday(st.session_state.selected_code)
+                    st.plotly_chart(make_intraday_figure(intra_df, row), use_container_width=True)
 
             st.info(row["摘要1"]); st.info(row["摘要2"]); st.info(row["摘要3"])
             if row["交易訊號"] == "🔥進場":
@@ -1073,19 +1308,19 @@ with tab1:
                     st.caption("目前抓不到新聞資料，因此改以技術面與量價重點為主。")
 
 
+
 with tab2:
+    st.caption(f"目前使用者：{st.session_state.current_user}")
     results = st.session_state.results_data
     with st.container(border=True):
         st.markdown("### 快照儲存")
+        st.caption("目前以盤前 / 盤後為主，盤中快照不作為主要比對依據。")
         if results:
-            s1, s2, s3 = st.columns(3)
+            s1, s2 = st.columns(2)
             if s1.button("儲存盤前快照", use_container_width=True):
                 save_snapshot("盤前", results)
                 st.success("已儲存盤前快照。")
-            if s2.button("儲存盤中快照", use_container_width=True):
-                save_snapshot("盤中", results)
-                st.success("已儲存盤中快照。")
-            if s3.button("儲存盤後快照", use_container_width=True):
+            if s2.button("儲存盤後快照", use_container_width=True):
                 save_snapshot("盤後", results)
                 st.success("已儲存盤後快照。")
         else:
@@ -1094,7 +1329,7 @@ with tab2:
     snapshots = load_snapshots()
     df_snap = pd.DataFrame(snapshots) if snapshots else pd.DataFrame()
 
-    with st.container(border=True):
+    with st.expander("快照管理", expanded=False):
         st.markdown("### 快照管理")
         if df_snap.empty:
             st.caption("目前沒有快照紀錄。")
@@ -1104,29 +1339,26 @@ with tab2:
                 stock_options = ["全部"] + sorted(df_snap["股票"].dropna().unique().tolist())
                 hist_stock = st.selectbox("選擇股票", stock_options, index=0, key="hist_stock")
             with c2:
-                type_options = ["全部"] + sorted(df_snap["類型"].dropna().unique().tolist())
+                type_options = ["全部", "盤前", "盤後"]
                 hist_type = st.selectbox("選擇類型", type_options, index=0, key="hist_type")
             with c3:
                 hist_n = st.selectbox("顯示筆數", [20, 50, 100, 200], index=1, key="hist_n")
 
             hist = df_snap.copy()
+            if "類型" in hist.columns:
+                hist = hist[hist["類型"].isin(["盤前", "盤後"])]
             if hist_stock != "全部":
                 hist = hist[hist["股票"] == hist_stock]
             if hist_type != "全部":
                 hist = hist[hist["類型"] == hist_type]
             hist = hist.sort_values("時間", ascending=False).head(hist_n)
 
-            st.dataframe(
-                hist[[c for c in ["時間","類型","股票","收盤","星級","結論","交易訊號","風報比","KD_K","KD_D","乖離率5日","量能變化","量能變化%"] if c in hist.columns]],
-                use_container_width=True,
-                hide_index=True
-            )
+            snap_cols = [c for c in ["時間","類型","股票","收盤","進場","停損","短期壓力","中繼目標","突破目標","風報比","結論","交易訊號"] if c in hist.columns]
+            st.dataframe(hist[snap_cols], use_container_width=True, hide_index=True)
 
             d1, d2 = st.columns(2)
             if d1.button("刪除目前篩選結果", use_container_width=True):
-                delete_keys = set(
-                    hist.apply(lambda r: (r.get("時間",""), r.get("類型",""), r.get("股票","")), axis=1).tolist()
-                )
+                delete_keys = set(hist.apply(lambda r: (r.get("時間",""), r.get("類型",""), r.get("股票","")), axis=1).tolist())
                 remain = []
                 for s in snapshots:
                     key = (s.get("時間",""), s.get("類型",""), s.get("股票",""))
@@ -1141,7 +1373,108 @@ with tab2:
                 st.success("已清空全部快照。")
                 st.rerun()
 
+    with st.expander("盤前 / 盤後雙比對", expanded=False):
+        st.markdown("### 盤前 / 盤後雙比對")
+        if df_snap.empty:
+            st.caption("目前沒有可比對的快照。")
+        else:
+            compare_df = df_snap.copy()
+            if "類型" in compare_df.columns:
+                compare_df = compare_df[compare_df["類型"].isin(["盤前", "盤後"])]
+
+            if compare_df.empty or "股票" not in compare_df.columns:
+                st.caption("目前沒有盤前 / 盤後快照可供比對。")
+            else:
+                cmp_stock_options = sorted(compare_df["股票"].dropna().unique().tolist())
+                selected_cmp_stock = st.selectbox("比對股票", cmp_stock_options, index=0, key="cmp_stock")
+                cmp_stock_df = compare_df[compare_df["股票"] == selected_cmp_stock].sort_values("時間", ascending=False)
+
+                pre_df = cmp_stock_df[cmp_stock_df["類型"] == "盤前"].sort_values("時間", ascending=False)
+                post_df = cmp_stock_df[cmp_stock_df["類型"] == "盤後"].sort_values("時間", ascending=False)
+
+                st.caption("預設抓這檔股票最新的盤前與最新的盤後快照，你也可以手動改時間。")
+
+                pre_options = pre_df["時間"].tolist() if not pre_df.empty else ["無資料"]
+                post_options = post_df["時間"].tolist() if not post_df.empty else ["無資料"]
+
+                sel1, sel2 = st.columns(2)
+                chosen_pre = sel1.selectbox("選擇盤前時間", pre_options, index=0, key="pre_time")
+                chosen_post = sel2.selectbox("選擇盤後時間", post_options, index=0, key="post_time")
+
+                if not pre_df.empty and not post_df.empty:
+                    pre_row = pre_df[pre_df["時間"] == chosen_pre].iloc[0].to_dict()
+                    post_row = post_df[post_df["時間"] == chosen_post].iloc[0].to_dict()
+
+                    s1, s2, s3, s4 = st.columns(4)
+                    s1.metric("盤前時間", pre_row.get("時間",""))
+                    s2.metric("盤後時間", post_row.get("時間",""))
+                    s3.metric("盤前結論", str(pre_row.get("結論","")))
+                    s4.metric("盤後結論", str(post_row.get("結論","")))
+
+                    compare_fields = [
+                        ("收盤", False),
+                        ("進場", True),
+                        ("停損", True),
+                        ("短期壓力", True),
+                        ("中繼目標", True),
+                        ("突破目標", True),
+                        ("風報比", True),
+                        ("結論", False),
+                        ("交易訊號", False),
+                        ("趨勢燈號", False),
+                        ("進場燈號", False),
+                        ("量能燈號", False),
+                    ]
+
+                    compare_rows = []
+                    for field, numeric in compare_fields:
+                        pre_val = pre_row.get(field, "")
+                        post_val = post_row.get(field, "")
+                        if numeric:
+                            try:
+                                pre_num = float(pre_val)
+                                post_num = float(post_val)
+                                diff = round(post_num - pre_num, 2)
+                                diff_text = f"+{diff}" if diff > 0 else str(diff)
+                            except Exception:
+                                diff_text = "—"
+                        else:
+                            diff_text = "有變化" if str(pre_val) != str(post_val) else "不變"
+
+                        compare_rows.append({"欄位": field, "盤前": pre_val, "盤後": post_val, "差異": diff_text})
+
+                    compare_table = pd.DataFrame(compare_rows)
+                    st.dataframe(compare_table, use_container_width=True, hide_index=True)
+
+                    st.markdown("#### 重點變化")
+                    highlights = []
+                    for field in ["進場", "停損", "短期壓力", "中繼目標", "突破目標", "風報比"]:
+                        try:
+                            a = float(pre_row.get(field, 0))
+                            b = float(post_row.get(field, 0))
+                            if a != b:
+                                sign = "+" if (b-a) > 0 else ""
+                                highlights.append(f"{field}：{a} → {b}（{sign}{round(b-a,2)}）")
+                        except Exception:
+                            pass
+
+                    for field in ["結論", "交易訊號", "趨勢燈號", "進場燈號", "量能燈號"]:
+                        a = str(pre_row.get(field, ""))
+                        b = str(post_row.get(field, ""))
+                        if a != b:
+                            highlights.append(f"{field}：{a} → {b}")
+
+                    if highlights:
+                        for h in highlights:
+                            st.info(h)
+                    else:
+                        st.caption("這組盤前 / 盤後快照沒有顯著差異。")
+                else:
+                    st.warning("這檔股票目前需要同時有盤前與盤後快照，才能做雙比對。")
+
 with tab3:
+    st.caption(f"目前使用者：{st.session_state.current_user}")
+
 
     t1,t2,t3,t4 = st.columns(4)
     trade_stock = t1.text_input("股票代碼", placeholder="例如 8046 或 8046.TW")
@@ -1155,6 +1488,7 @@ with tab3:
         code = trade_stock.strip().upper()
         if code:
             latest_snap = find_latest_snapshot_for_stock(code)
+            current_plan = get_current_plan_for_stock(code)
             record = {"時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "股票": code, "價格": float(trade_price), "數量": int(trade_qty), "動作": trade_action, "備註": trade_note}
             if trade_action == "買進":
                 record["剩餘數量"] = int(trade_qty)
@@ -1163,7 +1497,21 @@ with tab3:
                     record["快照結論"] = latest_snap.get("結論","")
                     record["快照訊號"] = latest_snap.get("交易訊號","")
                     record["快照星級"] = latest_snap.get("星級","")
-            trades = load_trades(); trades.append(record); save_trades(trades); st.success("已新增交易紀錄。"); st.rerun()
+                    record["快照時間"] = latest_snap.get("時間","")
+                pre_snap, post_snap = get_latest_pre_post_snapshot(code)
+                if pre_snap:
+                    record["盤前快照時間"] = pre_snap.get("時間","")
+                    record["盤前快照結論"] = pre_snap.get("結論","")
+                    record["盤前快照訊號"] = pre_snap.get("交易訊號","")
+                    record["盤前快照風報比"] = pre_snap.get("風報比","")
+                if post_snap:
+                    record["盤後快照時間"] = post_snap.get("時間","")
+                    record["盤後快照結論"] = post_snap.get("結論","")
+                    record["盤後快照訊號"] = post_snap.get("交易訊號","")
+                    record["盤後快照風報比"] = post_snap.get("風報比","")
+                if current_plan:
+                    record.update(current_plan)
+            trades = load_trades(); trades.append(record); save_trades(trades); st.success("已新增交易紀錄，並鎖定當下交易計畫。"); st.rerun()
     if b2.button("清空全部交易紀錄"):
         save_trades([]); st.success("已清空全部交易紀錄。"); st.rerun()
 
@@ -1177,7 +1525,25 @@ with tab3:
     total_pnl, total_count, win_rate, avg_ret = summary_stats(df_closed)
     s1,s2,s3,s4 = st.columns(4)
     s1.metric("總損益", f"{total_pnl:.2f}"); s2.metric("交易次數", total_count); s3.metric("勝率", f"{win_rate:.2f}%"); s4.metric("平均報酬率", f"{avg_ret:.2f}%")
+
+    st.subheader("交易 / 快照連動摘要")
+    if not df_open.empty or not df_closed.empty:
+        link_df = pd.concat([df_open.assign(狀態="未平倉"), df_closed.assign(狀態="已完成")], ignore_index=True, sort=False)
+        link_cols = [c for c in ["狀態","股票","計畫來源","計畫結論","計畫訊號","計畫風報比","盤前快照結論","盤前快照訊號","盤前快照風報比","盤後快照結論","盤後快照訊號","盤後快照風報比"] if c in link_df.columns]
+        st.dataframe(link_df[link_cols], use_container_width=True, hide_index=True)
+    else:
+        st.caption("目前沒有可連動的交易 / 快照資料。")
+
     st.subheader("已完成交易")
-    st.dataframe(df_closed if not df_closed.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+    if not df_closed.empty:
+        closed_core = [c for c in ["股票","買進時間","賣出時間","買進價","賣出價","數量","損益","報酬率%","計畫來源","計畫進場","計畫停損","計畫短壓","計畫中繼","計畫突破","計畫風報比","計畫結論","計畫訊號"] if c in df_closed.columns]
+        st.dataframe(df_closed[closed_core], use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(pd.DataFrame(), use_container_width=True, hide_index=True)
+
     st.subheader("尚未平倉")
-    st.dataframe(df_open if not df_open.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+    if not df_open.empty:
+        open_core = [c for c in ["股票","買進時間","買進價","剩餘數量","計畫來源","計畫進場","計畫停損","計畫短壓","計畫中繼","計畫突破","計畫風報比","計畫結論","計畫訊號"] if c in df_open.columns]
+        st.dataframe(df_open[open_core], use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(pd.DataFrame(), use_container_width=True, hide_index=True)
