@@ -10,8 +10,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v39")
-st.title("🚀 台股短線系統 v39")
+st.set_page_config(layout="wide", page_title="台股短線系統 v39.1")
+st.title("🚀 台股短線系統 v39.1")
 
 NAMES_FILE = Path("tw_stock_names.json")
 MAX_SNAPSHOTS = 5000
@@ -1629,15 +1629,23 @@ with tab2:
                 if c2.button("刪除所選股票", use_container_width=True):
                     if selected_remove:
                         delete_selected_from_pre_snapshot(chosen_group["時間"], selected_remove)
+                        st.session_state.pop("batch_compare_df", None)
+                        st.session_state.pop("batch_compare_label", None)
                         st.success(f"已從 {chosen_group['時間']} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
                         st.rerun()
                     else:
                         st.warning("請先選擇要刪除的股票。")
 
-            if st.button("產生盤後資訊對照", use_container_width=True):
+            b1, b2 = st.columns(2)
+            if b1.button("產生盤後資訊對照", use_container_width=True):
                 compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map)
                 st.session_state["batch_compare_df"] = compare_batch_df
                 st.session_state["batch_compare_label"] = chosen_label
+
+            if b2.button("清除對照結果", use_container_width=True):
+                st.session_state.pop("batch_compare_df", None)
+                st.session_state.pop("batch_compare_label", None)
+                st.rerun()
 
             if "batch_compare_df" in st.session_state and isinstance(st.session_state["batch_compare_df"], pd.DataFrame):
                 st.markdown(f"#### 對照結果：{st.session_state.get('batch_compare_label', '')}")
