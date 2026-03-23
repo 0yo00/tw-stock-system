@@ -10,8 +10,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v38.5")
-st.title("🚀 台股短線系統 v38.5")
+st.set_page_config(layout="wide", page_title="台股短線系統 v39")
+st.title("🚀 台股短線系統 v39")
 
 NAMES_FILE = Path("tw_stock_names.json")
 MAX_SNAPSHOTS = 5000
@@ -999,6 +999,111 @@ def auto_pick_strict_score(item: dict) -> float:
         score += 4
     return round(score, 2)
 
+
+def grouped_prefast_snapshots():
+    snaps = load_snapshots()
+    if not snaps:
+        return []
+    groups = {}
+    for s in snaps:
+        if s.get("類型") != "盤前":
+            continue
+        t = s.get("時間", "")
+        if not t:
+            continue
+        groups.setdefault(t, []).append(s)
+    result = []
+    for t, rows in groups.items():
+        result.append({
+            "時間": t,
+            "檔數": len(rows),
+            "股票清單": [r.get("股票", "") for r in rows],
+            "rows": rows
+        })
+    result.sort(key=lambda x: x["時間"], reverse=True)
+    return result
+
+
+def delete_selected_from_pre_snapshot(snapshot_time: str, selected_stocks: list[str]):
+    snaps = load_snapshots()
+    remain = []
+    selected = set(selected_stocks)
+    for s in snaps:
+        if s.get("類型") == "盤前" and s.get("時間") == snapshot_time and s.get("股票") in selected:
+            continue
+        remain.append(s)
+    save_snapshots(remain)
+
+def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
+    compare_rows = []
+    for pre in rows:
+        code = str(pre.get("股票代碼", "") or pre.get("股票", "")).split("（")[0].strip()
+        if not code:
+            continue
+        now_item = analyze_one(code, market_score_adj, name_map)
+        if now_item is None:
+            compare_rows.append({
+                "股票": pre.get("股票", code),
+                "盤前結論": pre.get("結論", ""),
+                "盤後結論": "抓取失敗",
+                "盤前訊號": pre.get("交易訊號", ""),
+                "盤後訊號": "抓取失敗",
+                "盤前風報比": pre.get("風報比", ""),
+                "盤後風報比": "",
+                "變化判斷": "資料不足"
+            })
+            continue
+
+        try:
+            pre_rr = float(pre.get("風報比", 0))
+            now_rr = float(now_item.get("風報比", 0))
+            rr_diff = round(now_rr - pre_rr, 2)
+        except Exception:
+            rr_diff = 0
+
+        pre_con = str(pre.get("結論", ""))
+        now_con = str(now_item.get("結論", ""))
+        pre_sig = str(pre.get("交易訊號", ""))
+        now_sig = str(now_item.get("交易訊號", ""))
+
+        stronger = 0
+        if pre_con != now_con:
+            stronger += 1 if now_con in ["看多", "中性偏多"] and pre_con not in ["看多", "中性偏多"] else 0
+            stronger -= 1 if pre_con in ["看多", "中性偏多"] and now_con not in ["看多", "中性偏多"] else 0
+        if pre_sig != now_sig:
+            sig_rank = {"🔥進場": 4, "👀觀察": 3, "⏳等待": 2, "❌不進": 0}
+            stronger += 1 if sig_rank.get(now_sig, 1) > sig_rank.get(pre_sig, 1) else 0
+            stronger -= 1 if sig_rank.get(now_sig, 1) < sig_rank.get(pre_sig, 1) else 0
+        if rr_diff > 0.15:
+            stronger += 1
+        elif rr_diff < -0.15:
+            stronger -= 1
+
+        if stronger >= 1:
+            judge = "變強"
+        elif stronger <= -1:
+            judge = "變弱"
+        else:
+            judge = "持平"
+
+        compare_rows.append({
+            "股票": pre.get("股票", code),
+            "盤前收盤": pre.get("收盤", ""),
+            "盤後收盤": now_item.get("收盤", ""),
+            "盤前進場": pre.get("進場", ""),
+            "盤後進場": now_item.get("進場", ""),
+            "盤前停損": pre.get("停損", ""),
+            "盤後停損": now_item.get("停損", ""),
+            "盤前風報比": pre.get("風報比", ""),
+            "盤後風報比": now_item.get("風報比", ""),
+            "盤前結論": pre_con,
+            "盤後結論": now_con,
+            "盤前訊號": pre_sig,
+            "盤後訊號": now_sig,
+            "變化判斷": judge
+        })
+    return pd.DataFrame(compare_rows)
+
 with tab1:
     st.caption(f"目前使用者：{st.session_state.current_user}")
     market_info = market_filter()
@@ -1372,12 +1477,13 @@ with tab1:
 
 
 
+
 with tab2:
     st.caption(f"目前使用者：{st.session_state.current_user}")
     results = st.session_state.results_data
     with st.container(border=True):
         st.markdown("### 快照儲存")
-        st.caption("目前以盤前 / 盤後為主，盤中快照不作為主要比對依據。")
+        st.caption("盤前快照負責定義名單；盤後資訊可直接從盤前名單一鍵產生對照。")
         if results:
             s1, s2 = st.columns(2)
             if s1.button("儲存盤前快照", use_container_width=True):
@@ -1475,18 +1581,10 @@ with tab2:
                     s4.metric("盤後結論", str(post_row.get("結論","")))
 
                     compare_fields = [
-                        ("收盤", False),
-                        ("進場", True),
-                        ("停損", True),
-                        ("短期壓力", True),
-                        ("中繼目標", True),
-                        ("突破目標", True),
-                        ("風報比", True),
-                        ("結論", False),
-                        ("交易訊號", False),
-                        ("趨勢燈號", False),
-                        ("進場燈號", False),
-                        ("量能燈號", False),
+                        ("收盤", False), ("進場", True), ("停損", True), ("短期壓力", True),
+                        ("中繼目標", True), ("突破目標", True), ("風報比", True),
+                        ("結論", False), ("交易訊號", False), ("趨勢燈號", False),
+                        ("進場燈號", False), ("量能燈號", False),
                     ]
 
                     compare_rows = []
@@ -1508,34 +1606,53 @@ with tab2:
 
                     compare_table = pd.DataFrame(compare_rows)
                     st.dataframe(compare_table, use_container_width=True, hide_index=True)
-
-                    st.markdown("#### 重點變化")
-                    highlights = []
-                    for field in ["進場", "停損", "短期壓力", "中繼目標", "突破目標", "風報比"]:
-                        try:
-                            a = float(pre_row.get(field, 0))
-                            b = float(post_row.get(field, 0))
-                            if a != b:
-                                sign = "+" if (b-a) > 0 else ""
-                                highlights.append(f"{field}：{a} → {b}（{sign}{round(b-a,2)}）")
-                        except Exception:
-                            pass
-
-                    for field in ["結論", "交易訊號", "趨勢燈號", "進場燈號", "量能燈號"]:
-                        a = str(pre_row.get(field, ""))
-                        b = str(post_row.get(field, ""))
-                        if a != b:
-                            highlights.append(f"{field}：{a} → {b}")
-
-                    if highlights:
-                        for h in highlights:
-                            st.info(h)
-                    else:
-                        st.caption("這組盤前 / 盤後快照沒有顯著差異。")
                 else:
                     st.warning("這檔股票目前需要同時有盤前與盤後快照，才能做雙比對。")
 
+    with st.container(border=True):
+        st.markdown("### 盤前名單一鍵盤後對照")
+        pre_groups = grouped_prefast_snapshots()
+        if not pre_groups:
+            st.caption("目前沒有盤前快照名單可供盤後對照。")
+        else:
+            options = [f"{g['時間']}｜{g['檔數']}檔" for g in pre_groups]
+            chosen_label = st.selectbox("選擇盤前名單", options, index=0, key="batch_pre_group")
+            chosen_group = pre_groups[options.index(chosen_label)]
+            st.caption("按下按鈕後，會直接抓這組盤前名單的當前資料，生成盤前 vs 盤後對照，不必先手動再存盤後快照。")
+
+            with st.expander("編輯這次盤前名單", expanded=False):
+                st.caption("可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
+                stock_options = chosen_group["股票清單"]
+                selected_remove = st.multiselect("選擇要從這次盤前名單刪除的股票", stock_options, key="remove_pre_stocks")
+                c1, c2 = st.columns(2)
+                c1.dataframe(pd.DataFrame({"目前盤前名單": stock_options}), use_container_width=True, hide_index=True)
+                if c2.button("刪除所選股票", use_container_width=True):
+                    if selected_remove:
+                        delete_selected_from_pre_snapshot(chosen_group["時間"], selected_remove)
+                        st.success(f"已從 {chosen_group['時間']} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
+                        st.rerun()
+                    else:
+                        st.warning("請先選擇要刪除的股票。")
+
+            if st.button("產生盤後資訊對照", use_container_width=True):
+                compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map)
+                st.session_state["batch_compare_df"] = compare_batch_df
+                st.session_state["batch_compare_label"] = chosen_label
+
+            if "batch_compare_df" in st.session_state and isinstance(st.session_state["batch_compare_df"], pd.DataFrame):
+                st.markdown(f"#### 對照結果：{st.session_state.get('batch_compare_label', '')}")
+                compare_batch_df = st.session_state["batch_compare_df"]
+                if not compare_batch_df.empty:
+                    st.dataframe(compare_batch_df, use_container_width=True, hide_index=True)
+                    summary1, summary2, summary3 = st.columns(3)
+                    summary1.metric("變強", int((compare_batch_df["變化判斷"] == "變強").sum()))
+                    summary2.metric("持平", int((compare_batch_df["變化判斷"] == "持平").sum()))
+                    summary3.metric("變弱", int((compare_batch_df["變化判斷"] == "變弱").sum()))
+                else:
+                    st.caption("目前沒有可顯示的對照結果。")
+
 with tab3:
+
     st.caption(f"目前使用者：{st.session_state.current_user}")
 
 
