@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v51")
+st.set_page_config(layout="wide", page_title="台股短線系統 v52")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v51</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v52</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v51")
+st.title("🚀 台股短線系統 v52")
 
 def inject_responsive_css():
     st.markdown("""
@@ -2085,8 +2085,6 @@ with tab2:
                             _high_result = ""
 
                         if st.session_state.mobile_mode:
-                            st.markdown("###### 手機快速對照")
-                            render_compare_chips(detail_row)
                             render_compare_matrix(detail_row, _entry)
                             render_sim_matrix(_close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret)
 
