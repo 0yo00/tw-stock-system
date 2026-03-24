@@ -11,14 +11,76 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(layout="wide", page_title="台股短線系統 v51")
+st.markdown("""
+<div class="app-sticky-header">
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v51</span></div>
+</div>
+""", unsafe_allow_html=True)
 st.title("🚀 台股短線系統 v51")
 
 def inject_responsive_css():
     st.markdown("""
     <style>
     .block-container {
-        padding-top: 1.2rem;
+        padding-top: 4.3rem;
         padding-bottom: 2rem;
+    }
+    .app-sticky-header {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 9999;
+        backdrop-filter: blur(10px);
+        background: rgba(14, 17, 23, 0.88);
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        padding: 0.65rem 1rem;
+    }
+    .app-sticky-title {
+        font-size: 1.02rem;
+        font-weight: 700;
+        color: #f8fafc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .app-sticky-title span {
+        color: #60a5fa;
+    }
+    .compare-matrix {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.35rem 0 0.9rem 0;
+        font-size: 0.92rem;
+        overflow: hidden;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .compare-matrix th, .compare-matrix td {
+        padding: 0.6rem 0.7rem;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        text-align: left;
+        vertical-align: top;
+    }
+    .compare-matrix th {
+        background: rgba(255,255,255,0.04);
+        font-weight: 700;
+    }
+    .compare-matrix tr:last-child td {
+        border-bottom: none;
+    }
+    .compare-chip-wrap {
+        display: flex;
+        gap: 0.45rem;
+        flex-wrap: wrap;
+        margin: 0.2rem 0 0.8rem 0;
+    }
+    .compare-chip {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 999px;
+        padding: 0.32rem 0.7rem;
+        font-size: 0.82rem;
+        background: rgba(255,255,255,0.03);
     }
     div[data-testid="stMetric"] {
         background: rgba(255,255,255,0.02);
@@ -59,9 +121,22 @@ def inject_responsive_css():
         }
         h1 {
             font-size: 1.55rem !important;
+            margin-top: 0.2rem !important;
         }
         h2, h3 {
             font-size: 1.20rem !important;
+        }
+        .app-sticky-header {
+            padding: 0.58rem 0.8rem;
+        }
+        .app-sticky-title {
+            font-size: 0.95rem;
+        }
+        .compare-matrix {
+            font-size: 0.84rem;
+        }
+        .compare-matrix th, .compare-matrix td {
+            padding: 0.5rem 0.55rem;
         }
         .stTabs [data-baseweb="tab-list"] button {
             padding-left: 0.5rem !important;
@@ -202,6 +277,78 @@ def display_name(code: str, name_map: dict):
     code = code.upper()
     name = name_map.get(code, "")
     return f"{code}（{name}）" if name else code
+
+
+def html_escape(value):
+    return (str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;"))
+
+
+def render_compare_matrix(detail_row, custom_entry_price):
+    compare_rows = [
+        ("收盤", fmt_price(detail_row.get("盤前收盤", "")), fmt_price(detail_row.get("盤後收盤", ""))),
+        ("支撐/最低", fmt_price(detail_row.get("盤前支撐", "")), fmt_price(detail_row.get("盤後最低", ""))),
+        ("壓力/最高", fmt_price(detail_row.get("盤前壓力", "")), fmt_price(detail_row.get("盤後最高", ""))),
+        ("建議進場", fmt_price(detail_row.get("盤前建議進場", "")), fmt_price(custom_entry_price)),
+        ("停損", fmt_price(detail_row.get("盤前停損", "")), fmt_text(detail_row.get("停損觸發", ""))),
+        ("風報比", fmt_price(detail_row.get("盤前風報比", "")), fmt_price(detail_row.get("盤後風報比", ""))),
+        ("結論", fmt_text(detail_row.get("盤前結論", "")), fmt_text(detail_row.get("盤後結論", ""))),
+        ("訊號", fmt_text(detail_row.get("盤前訊號", "")), fmt_text(detail_row.get("盤後訊號", ""))),
+    ]
+    table_rows = "".join(
+        f"<tr><td>{html_escape(label)}</td><td>{html_escape(pre)}</td><td>{html_escape(post)}</td></tr>"
+        for label, pre, post in compare_rows
+    )
+    st.markdown(
+        f"""
+    <table class="compare-matrix">
+      <thead>
+        <tr><th>項目</th><th>盤前</th><th>盤後</th></tr>
+      </thead>
+      <tbody>{table_rows}</tbody>
+    </table>
+    """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sim_matrix(close_price, close_result, close_pnl, close_ret, high_price, high_result, high_pnl, high_ret):
+    sim_rows = [
+        ("模擬收盤價", fmt_price(close_price), fmt_text(close_result)),
+        ("收盤損益", fmt_price(close_pnl), fmt_pct(close_ret)),
+        ("模擬最高價", fmt_price(high_price), fmt_text(high_result)),
+        ("最高損益", fmt_price(high_pnl), fmt_pct(high_ret)),
+    ]
+    table_rows = "".join(
+        f"<tr><td>{html_escape(label)}</td><td>{html_escape(v1)}</td><td>{html_escape(v2)}</td></tr>"
+        for label, v1, v2 in sim_rows
+    )
+    st.markdown(
+        f"""
+    <table class="compare-matrix">
+      <thead>
+        <tr><th>模擬項目</th><th>數值</th><th>結果/報酬</th></tr>
+      </thead>
+      <tbody>{table_rows}</tbody>
+    </table>
+    """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_compare_chips(detail_row):
+    chips = [
+        f"支撐驗證：{fmt_text(detail_row.get('支撐驗證', ''))}",
+        f"壓力驗證：{fmt_text(detail_row.get('壓力驗證', ''))}",
+        f"停損觸發：{fmt_text(detail_row.get('停損觸發', ''))}",
+        f"是否可成交：{fmt_text(detail_row.get('是否可成交', ''))}",
+        f"變化判斷：{fmt_text(detail_row.get('變化判斷', ''))}",
+    ]
+    chip_html = "".join(f'<div class="compare-chip">{html_escape(c)}</div>' for c in chips)
+    st.markdown(f'<div class="compare-chip-wrap">{chip_html}</div>', unsafe_allow_html=True)
 
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -1906,140 +2053,145 @@ with tab2:
                             default_entry_num = 0.0
                         custom_entry_price = detail_top3.number_input("自訂模擬進場價", min_value=0.0, value=float(default_entry_num), step=0.01, key=f"custom_entry_{selected_detail_stock}")
 
-                        detail_layout = 1 if st.session_state.mobile_mode else 2
-                        detail_cols = st.columns(detail_layout)
-                        d1 = detail_cols[0]
-                        d2 = detail_cols[0] if detail_layout == 1 else detail_cols[1]
+                        try:
+                            _entry = float(custom_entry_price)
+                        except Exception:
+                            _entry = 0.0
+                        try:
+                            _close = float(detail_row.get("模擬收盤價", detail_row.get("盤後收盤", "")))
+                        except Exception:
+                            _close = None
+                        try:
+                            _high = float(detail_row.get("模擬最高價", detail_row.get("盤後最高", "")))
+                        except Exception:
+                            _high = None
 
-                        with d1:
-                            st.markdown("###### 盤前資料")
-                            pre_cols_1 = st.columns(1 if st.session_state.mobile_mode else 3)
-                            pre_cols_1[0].metric("股票", detail_row.get("股票", ""))
-                            if st.session_state.mobile_mode:
-                                pre_cols_1 = st.columns(2)
-                                pre_cols_1[0].metric("代碼", detail_row.get("股票代碼", ""))
-                                pre_cols_1[1].metric("快照時間", detail_row.get("盤前快照時間", ""))
-                            else:
+                        if _entry > 0 and _close is not None:
+                            _close_pnl = round(_close - _entry, 2)
+                            _close_ret = round((_close - _entry) / _entry * 100, 2)
+                            _close_result = "上漲" if _close_pnl > 0 else ("下跌" if _close_pnl < 0 else "持平")
+                        else:
+                            _close_pnl = ""
+                            _close_ret = ""
+                            _close_result = ""
+
+                        if _entry > 0 and _high is not None:
+                            _high_pnl = round(_high - _entry, 2)
+                            _high_ret = round((_high - _entry) / _entry * 100, 2)
+                            _high_result = "上漲" if _high_pnl > 0 else ("下跌" if _high_pnl < 0 else "持平")
+                        else:
+                            _high_pnl = ""
+                            _high_ret = ""
+                            _high_result = ""
+
+                        if st.session_state.mobile_mode:
+                            st.markdown("###### 手機快速對照")
+                            render_compare_chips(detail_row)
+                            render_compare_matrix(detail_row, _entry)
+                            render_sim_matrix(_close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret)
+
+                            mobile_tabs = st.tabs(["對照重點", "盤前明細", "盤後明細"])
+                            with mobile_tabs[0]:
+                                top_a, top_b = st.columns(2)
+                                top_a.metric("股票", detail_row.get("股票", ""))
+                                top_b.metric("代碼", detail_row.get("股票代碼", ""))
+                                top_c, top_d = st.columns(2)
+                                top_c.metric("快照時間", detail_row.get("盤前快照時間", ""))
+                                top_d.metric("變化判斷", detail_row.get("變化判斷", ""))
+                                top_e, top_f = st.columns(2)
+                                top_e.metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
+                                top_f.metric("模擬進場價", fmt_price(_entry))
+                            with mobile_tabs[1]:
+                                pre_cols_2 = st.columns(2)
+                                pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
+                                pre_cols_2[1].metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
+                                pre_cols_3 = st.columns(2)
+                                pre_cols_3[0].metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
+                                pre_cols_3[1].metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
+                                pre_cols_4 = st.columns(2)
+                                pre_cols_4[0].metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
+                                pre_cols_4[1].metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
+                                st.metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
+                            with mobile_tabs[2]:
+                                post_cols_1 = st.columns(2)
+                                post_cols_1[0].metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
+                                post_cols_1[1].metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
+                                post_cols_2 = st.columns(2)
+                                post_cols_2[0].metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
+                                post_cols_2[1].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
+                                post_cols_3 = st.columns(2)
+                                post_cols_3[0].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
+                                post_cols_3[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
+                        else:
+                            detail_layout = 2
+                            detail_cols = st.columns(detail_layout)
+                            d1 = detail_cols[0]
+                            d2 = detail_cols[1]
+
+                            with d1:
+                                st.markdown("###### 盤前資料")
+                                pre_cols_1 = st.columns(3)
+                                pre_cols_1[0].metric("股票", detail_row.get("股票", ""))
                                 pre_cols_1[1].metric("代碼", detail_row.get("股票代碼", ""))
                                 pre_cols_1[2].metric("快照時間", detail_row.get("盤前快照時間", ""))
 
-                            pre_cols_2 = st.columns(2 if st.session_state.mobile_mode else 3)
-                            pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
-                            pre_cols_2[1].metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
-                            if not st.session_state.mobile_mode:
+                                pre_cols_2 = st.columns(3)
+                                pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
+                                pre_cols_2[1].metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
                                 pre_cols_2[2].metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
-                            else:
-                                st.columns(1)[0].metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
 
-                            pre_cols_3 = st.columns(2 if st.session_state.mobile_mode else 3)
-                            pre_cols_3[0].metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
-                            pre_cols_3[1].metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
-                            if not st.session_state.mobile_mode:
+                                pre_cols_3 = st.columns(3)
+                                pre_cols_3[0].metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
+                                pre_cols_3[1].metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
                                 pre_cols_3[2].metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
-                            else:
-                                st.columns(1)[0].metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
 
-                            pre_cols_4 = st.columns(2)
-                            pre_cols_4[0].metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
-                            pre_cols_4[1].metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
+                                pre_cols_4 = st.columns(2)
+                                pre_cols_4[0].metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
+                                pre_cols_4[1].metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
 
-                            st.markdown("###### 驗證結果")
-                            verify_cols = st.columns(2 if st.session_state.mobile_mode else 4)
-                            verify_cols[0].metric("支撐驗證", fmt_text(detail_row.get("支撐驗證", "")))
-                            verify_cols[1].metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
-                            if st.session_state.mobile_mode:
-                                verify_cols = st.columns(2)
-                                verify_cols[0].metric("停損觸發", fmt_text(detail_row.get("停損觸發", "")))
-                                verify_cols[1].metric("是否可成交", fmt_text(detail_row.get("是否可成交", "")))
-                            else:
+                                st.markdown("###### 驗證結果")
+                                verify_cols = st.columns(4)
+                                verify_cols[0].metric("支撐驗證", fmt_text(detail_row.get("支撐驗證", "")))
+                                verify_cols[1].metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
                                 verify_cols[2].metric("停損觸發", fmt_text(detail_row.get("停損觸發", "")))
                                 verify_cols[3].metric("是否可成交", fmt_text(detail_row.get("是否可成交", "")))
 
-                        with d2:
-                            with st.container(border=True):
-                                st.markdown("###### 盤後資料")
-                                post_cols_1 = st.columns(2 if st.session_state.mobile_mode else 3)
-                                post_cols_1[0].metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
-                                post_cols_1[1].metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
-                                if not st.session_state.mobile_mode:
+                            with d2:
+                                with st.container(border=True):
+                                    st.markdown("###### 盤後資料")
+                                    post_cols_1 = st.columns(3)
+                                    post_cols_1[0].metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
+                                    post_cols_1[1].metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
                                     post_cols_1[2].metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
-                                else:
-                                    st.columns(1)[0].metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
 
-                                post_cols_2 = st.columns(2 if st.session_state.mobile_mode else 3)
-                                post_cols_2[0].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
-                                post_cols_2[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
-                                if not st.session_state.mobile_mode:
+                                    post_cols_2 = st.columns(3)
+                                    post_cols_2[0].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
+                                    post_cols_2[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
                                     post_cols_2[2].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
-                                else:
-                                    st.columns(1)[0].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
 
-                            try:
-                                _entry = float(custom_entry_price)
-                            except Exception:
-                                _entry = 0.0
-                            try:
-                                _close = float(detail_row.get("模擬收盤價", detail_row.get("盤後收盤", "")))
-                            except Exception:
-                                _close = None
-                            try:
-                                _high = float(detail_row.get("模擬最高價", detail_row.get("盤後最高", "")))
-                            except Exception:
-                                _high = None
-
-                            if _entry > 0 and _close is not None:
-                                _close_pnl = round(_close - _entry, 2)
-                                _close_ret = round((_close - _entry) / _entry * 100, 2)
-                                _close_result = "上漲" if _close_pnl > 0 else ("下跌" if _close_pnl < 0 else "持平")
-                            else:
-                                _close_pnl = ""
-                                _close_ret = ""
-                                _close_result = ""
-
-                            if _entry > 0 and _high is not None:
-                                _high_pnl = round(_high - _entry, 2)
-                                _high_ret = round((_high - _entry) / _entry * 100, 2)
-                                _high_result = "上漲" if _high_pnl > 0 else ("下跌" if _high_pnl < 0 else "持平")
-                            else:
-                                _high_pnl = ""
-                                _high_ret = ""
-                                _high_result = ""
-
-                            with st.container(border=True):
-                                st.markdown("###### 收盤模擬")
-                                close_sim_cols = st.columns(2 if st.session_state.mobile_mode else 3)
-                                close_sim_cols[0].metric("模擬進場價", fmt_price(_entry))
-                                close_sim_cols[1].metric("模擬收盤價", fmt_price(_close))
-                                if not st.session_state.mobile_mode:
+                                with st.container(border=True):
+                                    st.markdown("###### 收盤模擬")
+                                    close_sim_cols = st.columns(3)
+                                    close_sim_cols[0].metric("模擬進場價", fmt_price(_entry))
+                                    close_sim_cols[1].metric("模擬收盤價", fmt_price(_close))
                                     close_sim_cols[2].metric("收盤模擬結果", fmt_text(_close_result))
-                                else:
-                                    st.columns(1)[0].metric("收盤模擬結果", fmt_text(_close_result))
 
-                                close_sim_cols_2 = st.columns(2 if st.session_state.mobile_mode else 3)
-                                close_sim_cols_2[0].metric("收盤模擬損益", fmt_price(_close_pnl))
-                                close_sim_cols_2[1].metric("收盤模擬報酬率%", fmt_pct(_close_ret))
-                                if not st.session_state.mobile_mode:
+                                    close_sim_cols_2 = st.columns(3)
+                                    close_sim_cols_2[0].metric("收盤模擬損益", fmt_price(_close_pnl))
+                                    close_sim_cols_2[1].metric("收盤模擬報酬率%", fmt_pct(_close_ret))
                                     close_sim_cols_2[2].metric("狀態", "收盤")
-                                else:
-                                    st.columns(1)[0].metric("狀態", "收盤")
 
-                            with st.container(border=True):
-                                st.markdown("###### 最高價模擬")
-                                high_sim_cols = st.columns(2 if st.session_state.mobile_mode else 3)
-                                high_sim_cols[0].metric("模擬最高價", fmt_price(_high))
-                                high_sim_cols[1].metric("最高模擬結果", fmt_text(_high_result))
-                                if not st.session_state.mobile_mode:
+                                with st.container(border=True):
+                                    st.markdown("###### 最高價模擬")
+                                    high_sim_cols = st.columns(3)
+                                    high_sim_cols[0].metric("模擬最高價", fmt_price(_high))
+                                    high_sim_cols[1].metric("最高模擬結果", fmt_text(_high_result))
                                     high_sim_cols[2].metric("狀態", "最高價")
-                                else:
-                                    st.columns(1)[0].metric("狀態", "最高價")
 
-                                high_sim_cols_2 = st.columns(2 if st.session_state.mobile_mode else 3)
-                                high_sim_cols_2[0].metric("最高模擬損益", fmt_price(_high_pnl))
-                                high_sim_cols_2[1].metric("最高模擬報酬率%", fmt_pct(_high_ret))
-                                if not st.session_state.mobile_mode:
+                                    high_sim_cols_2 = st.columns(3)
+                                    high_sim_cols_2[0].metric("最高模擬損益", fmt_price(_high_pnl))
+                                    high_sim_cols_2[1].metric("最高模擬報酬率%", fmt_pct(_high_ret))
                                     high_sim_cols_2[2].metric("對照", "盤中")
-                                else:
-                                    st.columns(1)[0].metric("對照", "盤中")
                 else:
                     st.caption("目前沒有可顯示的對照結果。")
 
