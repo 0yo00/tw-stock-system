@@ -10,8 +10,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v39.1")
-st.title("🚀 台股短線系統 v39.1")
+st.set_page_config(layout="wide", page_title="台股短線系統 v40")
+st.title("🚀 台股短線系統 v40")
 
 NAMES_FILE = Path("tw_stock_names.json")
 MAX_SNAPSHOTS = 5000
