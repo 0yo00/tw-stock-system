@@ -10,8 +10,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v40")
-st.title("🚀 台股短線系統 v40")
+st.set_page_config(layout="wide", page_title="台股短線系統 v50")
+st.title("🚀 台股短線系統 v50")
 
 NAMES_FILE = Path("tw_stock_names.json")
 MAX_SNAPSHOTS = 5000
@@ -1034,37 +1034,155 @@ def delete_selected_from_pre_snapshot(snapshot_time: str, selected_stocks: list[
         remain.append(s)
     save_snapshots(remain)
 
+def get_latest_ohlc_for_compare(symbol_code: str):
+    try:
+        df = download_symbol(symbol_code)
+        if df is None or df.empty:
+            return {"close": "", "high": "", "low": ""}
+        last = df.iloc[-1]
+        return {
+            "close": float(last.get("Close", "")) if str(last.get("Close", "")) != "" else "",
+            "high": float(last.get("High", "")) if str(last.get("High", "")) != "" else "",
+            "low": float(last.get("Low", "")) if str(last.get("Low", "")) != "" else "",
+        }
+    except Exception:
+        return {"close": "", "high": "", "low": ""}
+
 def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
     compare_rows = []
     for pre in rows:
         code = str(pre.get("股票代碼", "") or pre.get("股票", "")).split("（")[0].strip()
         if not code:
             continue
+
         now_item = analyze_one(code, market_score_adj, name_map)
         if now_item is None:
             compare_rows.append({
                 "股票": pre.get("股票", code),
-                "盤前結論": pre.get("結論", ""),
-                "盤後結論": "抓取失敗",
-                "盤前訊號": pre.get("交易訊號", ""),
-                "盤後訊號": "抓取失敗",
+                "股票代碼": code,
+                "盤前快照時間": pre.get("時間", ""),
+                "盤前收盤": pre.get("收盤", ""),
+                "盤前支撐": pre.get("支撐", ""),
+                "盤前壓力": pre.get("短期壓力", ""),
+                "盤前建議進場": pre.get("進場", ""),
+                "盤前停損": pre.get("停損", ""),
                 "盤前風報比": pre.get("風報比", ""),
+                "盤前結論": pre.get("結論", ""),
+                "盤前訊號": pre.get("交易訊號", ""),
+                "盤後收盤": "",
+                "盤後最高": "",
+                "盤後最低": "",
                 "盤後風報比": "",
+                "盤後結論": "抓取失敗",
+                "盤後訊號": "抓取失敗",
+                "支撐驗證": "資料不足",
+                "壓力驗證": "資料不足",
+                "停損觸發": "資料不足",
+                "是否可成交": "資料不足",
+                "模擬進場價": pre.get("進場", ""),
+                "模擬收盤價": "",
+                "收盤模擬損益": "",
+                "收盤模擬報酬率%": "",
+                "收盤模擬結果": "資料不足",
+                "模擬最高價": "",
+                "最高模擬損益": "",
+                "最高模擬報酬率%": "",
+                "最高模擬結果": "資料不足",
                 "變化判斷": "資料不足"
             })
             continue
-
-        try:
-            pre_rr = float(pre.get("風報比", 0))
-            now_rr = float(now_item.get("風報比", 0))
-            rr_diff = round(now_rr - pre_rr, 2)
-        except Exception:
-            rr_diff = 0
 
         pre_con = str(pre.get("結論", ""))
         now_con = str(now_item.get("結論", ""))
         pre_sig = str(pre.get("交易訊號", ""))
         now_sig = str(now_item.get("交易訊號", ""))
+
+        pre_support = pre.get("支撐", "")
+        pre_resistance = pre.get("短期壓力", "")
+        pre_entry = pre.get("進場", "")
+        pre_stop = pre.get("停損", "")
+
+        ohlc_info = get_latest_ohlc_for_compare(code)
+        post_close = ohlc_info.get("close", now_item.get("收盤", ""))
+        post_high = ohlc_info.get("high", now_item.get("收盤", ""))
+        post_low = ohlc_info.get("low", now_item.get("收盤", ""))
+
+        support_check = "資料不足"
+        resistance_check = "資料不足"
+        stop_trigger = "資料不足"
+        fillable = "資料不足"
+        sim_close_pnl = ""
+        sim_close_ret = ""
+        sim_high_pnl = ""
+        sim_high_ret = ""
+        sim_close_result = "資料不足"
+        sim_high_result = "資料不足"
+
+        rr_diff = 0
+        try:
+            pre_rr = float(pre.get("風報比", 0))
+            now_rr = float(now_item.get("風報比", 0))
+            rr_diff = round(now_rr - pre_rr, 2)
+        except Exception:
+            pass
+
+        try:
+            pre_support_f = float(pre_support)
+            post_low_f = float(post_low)
+            support_check = "守住支撐" if post_low_f >= pre_support_f else "跌破支撐"
+        except Exception:
+            pass
+
+        try:
+            pre_resistance_f = float(pre_resistance)
+            post_high_f = float(post_high)
+            post_close_f = float(post_close)
+            if post_high_f < pre_resistance_f:
+                resistance_check = "未碰壓力"
+            elif post_close_f >= pre_resistance_f:
+                resistance_check = "有效突破"
+            else:
+                resistance_check = "遇壓回落"
+        except Exception:
+            pass
+
+        try:
+            pre_stop_f = float(pre_stop)
+            post_low_f = float(post_low)
+            stop_trigger = "已觸發" if post_low_f <= pre_stop_f else "未觸發"
+        except Exception:
+            pass
+
+        try:
+            pre_entry_f = float(pre_entry)
+            post_low_f = float(post_low)
+            post_close_f = float(post_close)
+            post_high_f = float(post_high)
+            fillable = "可成交" if post_low_f <= pre_entry_f else "未成交"
+            if fillable == "可成交":
+                pnl_close = round(post_close_f - pre_entry_f, 2)
+                ret_close = round((post_close_f - pre_entry_f) / pre_entry_f * 100, 2)
+                sim_close_pnl = pnl_close
+                sim_close_ret = ret_close
+                if pnl_close > 0:
+                    sim_close_result = "上漲"
+                elif pnl_close < 0:
+                    sim_close_result = "下跌"
+                else:
+                    sim_close_result = "持平"
+
+                pnl_high = round(post_high_f - pre_entry_f, 2)
+                ret_high = round((post_high_f - pre_entry_f) / pre_entry_f * 100, 2)
+                sim_high_pnl = pnl_high
+                sim_high_ret = ret_high
+                if pnl_high > 0:
+                    sim_high_result = "上漲"
+                elif pnl_high < 0:
+                    sim_high_result = "下跌"
+                else:
+                    sim_high_result = "持平"
+        except Exception:
+            pass
 
         stronger = 0
         if pre_con != now_con:
@@ -1078,6 +1196,14 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
             stronger += 1
         elif rr_diff < -0.15:
             stronger -= 1
+        if resistance_check == "有效突破":
+            stronger += 1
+        elif resistance_check == "遇壓回落":
+            stronger -= 1
+        if support_check == "跌破支撐":
+            stronger -= 1
+        if stop_trigger == "已觸發":
+            stronger -= 1
 
         if stronger >= 1:
             judge = "變強"
@@ -1088,21 +1214,60 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
 
         compare_rows.append({
             "股票": pre.get("股票", code),
+            "股票代碼": code,
+            "盤前快照時間": pre.get("時間", ""),
             "盤前收盤": pre.get("收盤", ""),
-            "盤後收盤": now_item.get("收盤", ""),
-            "盤前進場": pre.get("進場", ""),
-            "盤後進場": now_item.get("進場", ""),
-            "盤前停損": pre.get("停損", ""),
-            "盤後停損": now_item.get("停損", ""),
+            "盤前支撐": pre_support,
+            "盤前壓力": pre_resistance,
+            "盤前建議進場": pre_entry,
+            "盤前停損": pre_stop,
             "盤前風報比": pre.get("風報比", ""),
-            "盤後風報比": now_item.get("風報比", ""),
             "盤前結論": pre_con,
-            "盤後結論": now_con,
             "盤前訊號": pre_sig,
+            "盤後收盤": post_close,
+            "盤後最高": post_high,
+            "盤後最低": post_low,
+            "盤後風報比": now_item.get("風報比", ""),
+            "盤後結論": now_con,
             "盤後訊號": now_sig,
+            "支撐驗證": support_check,
+            "壓力驗證": resistance_check,
+            "停損觸發": stop_trigger,
+            "是否可成交": fillable,
+            "模擬進場價": pre_entry,
+            "模擬收盤價": post_close,
+            "收盤模擬損益": sim_close_pnl,
+            "收盤模擬報酬率%": sim_close_ret,
+            "收盤模擬結果": sim_close_result,
+            "模擬最高價": post_high,
+            "最高模擬損益": sim_high_pnl,
+            "最高模擬報酬率%": sim_high_ret,
+            "最高模擬結果": sim_high_result,
             "變化判斷": judge
         })
     return pd.DataFrame(compare_rows)
+
+
+def fmt_price(v):
+    try:
+        if v == "" or v is None:
+            return ""
+        return f"{float(v):.2f}"
+    except Exception:
+        return str(v)
+
+def fmt_pct(v):
+    try:
+        if v == "" or v is None:
+            return ""
+        return f"{float(v):.2f}"
+    except Exception:
+        return str(v)
+
+def fmt_text(v):
+    if v is None:
+        return ""
+    return str(v)
 
 with tab1:
     st.caption(f"目前使用者：{st.session_state.current_user}")
@@ -1651,11 +1816,121 @@ with tab2:
                 st.markdown(f"#### 對照結果：{st.session_state.get('batch_compare_label', '')}")
                 compare_batch_df = st.session_state["batch_compare_df"]
                 if not compare_batch_df.empty:
-                    st.dataframe(compare_batch_df, use_container_width=True, hide_index=True)
                     summary1, summary2, summary3 = st.columns(3)
                     summary1.metric("變強", int((compare_batch_df["變化判斷"] == "變強").sum()))
                     summary2.metric("持平", int((compare_batch_df["變化判斷"] == "持平").sum()))
                     summary3.metric("變弱", int((compare_batch_df["變化判斷"] == "變弱").sum()))
+
+                    st.markdown("##### 總覽")
+                    overview_cols = [c for c in [
+                        "股票","股票代碼","盤前收盤","盤後收盤","收盤模擬報酬率%","最高模擬報酬率%",
+                        "支撐驗證","壓力驗證","停損觸發","變化判斷"
+                    ] if c in compare_batch_df.columns]
+                    st.dataframe(compare_batch_df[overview_cols], use_container_width=True, hide_index=True)
+
+                    with st.expander("單股詳細對比", expanded=False):
+                        detail_top1, detail_top2, detail_top3 = st.columns([2,1,1])
+                        detail_options = compare_batch_df["股票"].tolist()
+                        selected_detail_stock = detail_top1.selectbox("選擇要查看的股票", detail_options, index=0, key="detail_compare_stock")
+                        detail_row = compare_batch_df[compare_batch_df["股票"] == selected_detail_stock].iloc[0].to_dict()
+                        detail_top2.metric("變化判斷", detail_row.get("變化判斷", ""))
+                        default_entry_val = detail_row.get("模擬進場價", detail_row.get("盤前建議進場", ""))
+                        try:
+                            default_entry_num = float(default_entry_val)
+                        except Exception:
+                            default_entry_num = 0.0
+                        custom_entry_price = detail_top3.number_input("自訂模擬進場價", min_value=0.0, value=float(default_entry_num), step=0.01, key=f"custom_entry_{selected_detail_stock}")
+
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            st.markdown("###### 盤前資料")
+                            p1, p2, p3 = st.columns(3)
+                            p1.metric("股票", detail_row.get("股票", ""))
+                            p2.metric("代碼", detail_row.get("股票代碼", ""))
+                            p3.metric("快照時間", detail_row.get("盤前快照時間", ""))
+                            p4, p5, p6 = st.columns(3)
+                            p4.metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
+                            p5.metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
+                            p6.metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
+                            p7, p8, p9 = st.columns(3)
+                            p7.metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
+                            p8.metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
+                            p9.metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
+                            p10, p11 = st.columns(2)
+                            p10.metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
+                            p11.metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
+
+                            st.markdown("###### 驗證結果")
+                            v1, v2, v3, v4 = st.columns(4)
+                            v1.metric("支撐驗證", fmt_text(detail_row.get("支撐驗證", "")))
+                            v2.metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
+                            v3.metric("停損觸發", fmt_text(detail_row.get("停損觸發", "")))
+                            v4.metric("是否可成交", fmt_text(detail_row.get("是否可成交", "")))
+
+                        with d2:
+                            with st.container(border=True):
+                                st.markdown("###### 盤後資料")
+                                q1, q2, q3 = st.columns(3)
+                                q1.metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
+                                q2.metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
+                                q3.metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
+                                q4, q5, q6 = st.columns(3)
+                                q4.metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
+                                q5.metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
+                                q6.metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
+
+                            try:
+                                _entry = float(custom_entry_price)
+                            except Exception:
+                                _entry = 0.0
+                            try:
+                                _close = float(detail_row.get("模擬收盤價", detail_row.get("盤後收盤", "")))
+                            except Exception:
+                                _close = None
+                            try:
+                                _high = float(detail_row.get("模擬最高價", detail_row.get("盤後最高", "")))
+                            except Exception:
+                                _high = None
+
+                            if _entry > 0 and _close is not None:
+                                _close_pnl = round(_close - _entry, 2)
+                                _close_ret = round((_close - _entry) / _entry * 100, 2)
+                                _close_result = "上漲" if _close_pnl > 0 else ("下跌" if _close_pnl < 0 else "持平")
+                            else:
+                                _close_pnl = ""
+                                _close_ret = ""
+                                _close_result = ""
+
+                            if _entry > 0 and _high is not None:
+                                _high_pnl = round(_high - _entry, 2)
+                                _high_ret = round((_high - _entry) / _entry * 100, 2)
+                                _high_result = "上漲" if _high_pnl > 0 else ("下跌" if _high_pnl < 0 else "持平")
+                            else:
+                                _high_pnl = ""
+                                _high_ret = ""
+                                _high_result = ""
+
+                            with st.container(border=True):
+                                st.markdown("###### 收盤模擬")
+                                cr1, cr2, cr3 = st.columns(3)
+                                cr1.metric("模擬進場價", fmt_price(_entry))
+                                cr2.metric("模擬收盤價", fmt_price(_close))
+                                cr3.metric("收盤模擬結果", fmt_text(_close_result))
+                                cr4, cr5, cr6 = st.columns(3)
+                                cr4.metric("收盤模擬損益", fmt_price(_close_pnl))
+                                cr5.metric("收盤模擬報酬率%", fmt_pct(_close_ret))
+                                cr6.metric("狀態", "收盤")
+
+                            with st.container(border=True):
+                                st.markdown("###### 最高價模擬")
+                                hr1, hr2, hr3 = st.columns(3)
+                                hr1.metric("模擬最高價", fmt_price(_high))
+                                hr2.metric("最高模擬結果", fmt_text(_high_result))
+                                hr3.metric("狀態", "最高價")
+                                hr4, hr5, hr6 = st.columns(3)
+                                hr4.metric("最高模擬損益", fmt_price(_high_pnl))
+                                hr5.metric("最高模擬報酬率%", fmt_pct(_high_ret))
+                                hr6.metric("對照", "盤中")
                 else:
                     st.caption("目前沒有可顯示的對照結果。")
 
