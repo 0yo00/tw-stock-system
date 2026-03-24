@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v52")
+st.set_page_config(layout="wide", page_title="台股短線系統 v59")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v52</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v59</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v52")
+st.title("🚀 台股短線系統 v59")
 
 def inject_responsive_css():
     st.markdown("""
@@ -287,12 +287,12 @@ def html_escape(value):
         .replace('"', "&quot;"))
 
 
-def render_compare_matrix(detail_row, custom_entry_price):
+def render_compare_matrix(detail_row):
     compare_rows = [
         ("收盤", fmt_price(detail_row.get("盤前收盤", "")), fmt_price(detail_row.get("盤後收盤", ""))),
         ("支撐/最低", fmt_price(detail_row.get("盤前支撐", "")), fmt_price(detail_row.get("盤後最低", ""))),
         ("壓力/最高", fmt_price(detail_row.get("盤前壓力", "")), fmt_price(detail_row.get("盤後最高", ""))),
-        ("建議進場", fmt_price(detail_row.get("盤前建議進場", "")), fmt_price(custom_entry_price)),
+        ("建議進場", fmt_price(detail_row.get("盤前建議進場", "")), fmt_price(detail_row.get("模擬進場價", detail_row.get("盤前建議進場", "")))),
         ("停損", fmt_price(detail_row.get("盤前停損", "")), fmt_text(detail_row.get("停損觸發", ""))),
         ("風報比", fmt_price(detail_row.get("盤前風報比", "")), fmt_price(detail_row.get("盤後風報比", ""))),
         ("結論", fmt_text(detail_row.get("盤前結論", "")), fmt_text(detail_row.get("盤後結論", ""))),
@@ -315,12 +315,15 @@ def render_compare_matrix(detail_row, custom_entry_price):
     )
 
 
-def render_sim_matrix(close_price, close_result, close_pnl, close_ret, high_price, high_result, high_pnl, high_ret):
+def render_sim_matrix(entry_time, close_price, close_result, close_pnl, close_ret, high_price, high_result, high_pnl, high_ret, low_price, low_result, low_pnl, low_ret):
     sim_rows = [
+        ("進場時間", fmt_text(entry_time), fmt_text("成交後起算" if fmt_text(entry_time) not in ["", "--", "資料不足", "未成交"] else "")),
         ("模擬收盤價", fmt_price(close_price), fmt_text(close_result)),
         ("收盤損益", fmt_price(close_pnl), fmt_pct(close_ret)),
         ("模擬最高價", fmt_price(high_price), fmt_text(high_result)),
         ("最高損益", fmt_price(high_pnl), fmt_pct(high_ret)),
+        ("模擬最低價", fmt_price(low_price), fmt_text(low_result)),
+        ("最低損益", fmt_price(low_pnl), fmt_pct(low_ret)),
     ]
     table_rows = "".join(
         f"<tr><td>{html_escape(label)}</td><td>{html_escape(v1)}</td><td>{html_escape(v2)}</td></tr>"
@@ -948,15 +951,147 @@ def build_favorites_panel(favs, market_score_adj, name_map):
 
 
 def download_intraday(symbol: str):
-    try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="1d", interval="5m", auto_adjust=False)
+    def _normalize_intraday(df):
         if df is None or df.empty:
             return pd.DataFrame()
-        df = df.reset_index()
+        df = df.reset_index().copy()
+        time_col = "Datetime" if "Datetime" in df.columns else ("Date" if "Date" in df.columns else df.columns[0])
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        if hasattr(df[time_col].dt, "tz") and df[time_col].dt.tz is not None:
+            try:
+                df[time_col] = df[time_col].dt.tz_convert("Asia/Taipei").dt.tz_localize(None)
+            except Exception:
+                try:
+                    df[time_col] = df[time_col].dt.tz_localize(None)
+                except Exception:
+                    pass
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col not in df.columns:
+                df[col] = pd.NA
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=[time_col, "High", "Low", "Close"]).sort_values(time_col).reset_index(drop=True)
+        if time_col != "Datetime":
+            df = df.rename(columns={time_col: "Datetime"})
         return df
+
+    try:
+        t = yf.Ticker(symbol)
+
+        # 優先抓 1 分 K，模擬進場較準；抓不到再退回 5 分 K
+        for interval in ["1m", "2m", "5m"]:
+            try:
+                df = t.history(period="1d", interval=interval, auto_adjust=False)
+                df = _normalize_intraday(df)
+                if df is not None and not df.empty:
+                    return df
+            except Exception:
+                continue
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+def simulate_entry_from_intraday(symbol: str, entry_price, stop_price=None):
+    result = {
+        "是否可成交": "資料不足",
+        "進場時間": "--",
+        "模擬收盤價": "",
+        "收盤模擬損益": "",
+        "收盤模擬報酬率%": "",
+        "收盤模擬結果": "資料不足",
+        "模擬最高價": "",
+        "最高模擬損益": "",
+        "最高模擬報酬率%": "",
+        "最高模擬結果": "資料不足",
+        "模擬最低價": "",
+        "最低模擬損益": "",
+        "最低模擬報酬率%": "",
+        "最低模擬結果": "資料不足",
+        "停損觸發": "資料不足",
+    }
+    try:
+        entry_f = float(entry_price)
+    except Exception:
+        return result
+    if entry_f <= 0:
+        result["是否可成交"] = "未成交"
+        result["收盤模擬結果"] = "未成交"
+        result["最高模擬結果"] = "未成交"
+        result["最低模擬結果"] = "未成交"
+        result["停損觸發"] = "--"
+        return result
+
+    df_intra = download_intraday(symbol)
+    if df_intra is None or df_intra.empty:
+        return result
+
+    hit_mask = df_intra["Low"] <= entry_f
+    if not hit_mask.any():
+        result["是否可成交"] = "未成交"
+        result["收盤模擬結果"] = "未成交"
+        result["最高模擬結果"] = "未成交"
+        result["最低模擬結果"] = "未成交"
+        result["停損觸發"] = "--"
+        return result
+    first_idx = hit_mask[hit_mask].index[0]
+    entry_bar_df = df_intra.loc[[first_idx]].copy()
+    after_df = df_intra.loc[first_idx + 1:].copy()
+
+    entry_time = entry_bar_df.iloc[0]["Datetime"]
+    if pd.notna(entry_time):
+        try:
+            entry_time_str = pd.to_datetime(entry_time).strftime("%H:%M")
+        except Exception:
+            entry_time_str = str(entry_time)
+    else:
+        entry_time_str = "--"
+    # 這裡改用 Close 序列做模擬最高/最低，
+    # 因為使用者實際對照的是分時成交走勢線，而不是每根K棒內部 High/Low。
+    if after_df.empty:
+        after_close = round(float(entry_f), 1)
+        after_high = round(float(entry_f), 1)
+        after_low = round(float(entry_f), 1)
+    else:
+        close_series = pd.to_numeric(after_df["Close"], errors="coerce").dropna()
+        if close_series.empty:
+            after_close = round(float(entry_f), 1)
+            after_high = round(float(entry_f), 1)
+            after_low = round(float(entry_f), 1)
+        else:
+            after_close = round(float(close_series.iloc[-1]), 1)
+            after_high = round(float(max(entry_f, close_series.max())), 1)
+            after_low = round(float(min(entry_f, close_series.min())), 1)
+
+    close_pnl = round(after_close - entry_f, 2)
+    close_ret = round((after_close - entry_f) / entry_f * 100, 2)
+    high_pnl = round(after_high - entry_f, 2)
+    high_ret = round((after_high - entry_f) / entry_f * 100, 2)
+    low_pnl = round(after_low - entry_f, 2)
+    low_ret = round((after_low - entry_f) / entry_f * 100, 2)
+
+    result.update({
+        "是否可成交": "可成交",
+        "進場時間": entry_time_str,
+        "模擬收盤價": after_close,
+        "收盤模擬損益": close_pnl,
+        "收盤模擬報酬率%": close_ret,
+        "收盤模擬結果": "上漲" if close_pnl > 0 else ("下跌" if close_pnl < 0 else "持平"),
+        "模擬最高價": after_high,
+        "最高模擬損益": high_pnl,
+        "最高模擬報酬率%": high_ret,
+        "最高模擬結果": "上漲" if high_pnl > 0 else ("下跌" if high_pnl < 0 else "持平"),
+        "模擬最低價": after_low,
+        "最低模擬損益": low_pnl,
+        "最低模擬報酬率%": low_ret,
+        "最低模擬結果": "上漲" if low_pnl > 0 else ("下跌" if low_pnl < 0 else "持平"),
+    })
+
+    try:
+        stop_f = float(stop_price)
+        result["停損觸發"] = "已觸發" if after_low <= stop_f else "未觸發"
+    except Exception:
+        result["停損觸發"] = "--"
+
+    return result
 
 def make_intraday_figure(df_intra: pd.DataFrame, row: pd.Series):
     fig = go.Figure()
@@ -1363,32 +1498,24 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
 
         try:
             pre_entry_f = float(pre_entry)
-            post_low_f = float(post_low)
-            post_close_f = float(post_close)
-            post_high_f = float(post_high)
-            fillable = "可成交" if post_low_f <= pre_entry_f else "未成交"
+            sim_data = simulate_entry_from_intraday(code, pre_entry_f, pre_stop)
+            fillable = sim_data.get("是否可成交", "資料不足")
+            sim_close_pnl = sim_data.get("收盤模擬損益", "")
+            sim_close_ret = sim_data.get("收盤模擬報酬率%", "")
+            sim_close_result = sim_data.get("收盤模擬結果", "資料不足")
+            sim_high_pnl = sim_data.get("最高模擬損益", "")
+            sim_high_ret = sim_data.get("最高模擬報酬率%", "")
+            sim_high_result = sim_data.get("最高模擬結果", "資料不足")
             if fillable == "可成交":
-                pnl_close = round(post_close_f - pre_entry_f, 2)
-                ret_close = round((post_close_f - pre_entry_f) / pre_entry_f * 100, 2)
-                sim_close_pnl = pnl_close
-                sim_close_ret = ret_close
-                if pnl_close > 0:
-                    sim_close_result = "上漲"
-                elif pnl_close < 0:
-                    sim_close_result = "下跌"
-                else:
-                    sim_close_result = "持平"
-
-                pnl_high = round(post_high_f - pre_entry_f, 2)
-                ret_high = round((post_high_f - pre_entry_f) / pre_entry_f * 100, 2)
-                sim_high_pnl = pnl_high
-                sim_high_ret = ret_high
-                if pnl_high > 0:
-                    sim_high_result = "上漲"
-                elif pnl_high < 0:
-                    sim_high_result = "下跌"
-                else:
-                    sim_high_result = "持平"
+                post_close = sim_data.get("模擬收盤價", post_close)
+                post_high = sim_data.get("模擬最高價", post_high)
+                post_low = sim_data.get("模擬最低價", post_low)
+                stop_trigger = sim_data.get("停損觸發", stop_trigger)
+            elif fillable == "未成交":
+                post_close = ""
+                post_high = ""
+                post_low = ""
+                stop_trigger = "--"
         except Exception:
             pass
 
@@ -2041,7 +2168,7 @@ with tab2:
                     st.dataframe(compare_batch_df[overview_cols], use_container_width=True, hide_index=True)
 
                     with st.expander("單股詳細對比", expanded=False):
-                        detail_top1, detail_top2, detail_top3 = st.columns([2,1,1])
+                        detail_top1, detail_top2 = st.columns([2,1])
                         detail_options = compare_batch_df["股票"].tolist()
                         selected_detail_stock = detail_top1.selectbox("選擇要查看的股票", detail_options, index=0, key="detail_compare_stock")
                         detail_row = compare_batch_df[compare_batch_df["股票"] == selected_detail_stock].iloc[0].to_dict()
@@ -2051,42 +2178,77 @@ with tab2:
                             default_entry_num = float(default_entry_val)
                         except Exception:
                             default_entry_num = 0.0
-                        custom_entry_price = detail_top3.number_input("自訂模擬進場價", min_value=0.0, value=float(default_entry_num), step=0.01, key=f"custom_entry_{selected_detail_stock}")
 
-                        try:
-                            _entry = float(custom_entry_price)
-                        except Exception:
-                            _entry = 0.0
-                        try:
-                            _close = float(detail_row.get("模擬收盤價", detail_row.get("盤後收盤", "")))
-                        except Exception:
-                            _close = None
-                        try:
-                            _high = float(detail_row.get("模擬最高價", detail_row.get("盤後最高", "")))
-                        except Exception:
-                            _high = None
+                        detail_code = str(detail_row.get("股票代碼", "")).strip()
+                        if not detail_code:
+                            detail_code = str(detail_row.get("股票", "")).strip()
+                        if " (" in detail_code:
+                            detail_code = detail_code.split(" (", 1)[0].strip()
 
-                        if _entry > 0 and _close is not None:
-                            _close_pnl = round(_close - _entry, 2)
-                            _close_ret = round((_close - _entry) / _entry * 100, 2)
-                            _close_result = "上漲" if _close_pnl > 0 else ("下跌" if _close_pnl < 0 else "持平")
-                        else:
-                            _close_pnl = ""
-                            _close_ret = ""
-                            _close_result = ""
+                        def _calc_sim(entry_val):
+                            sim_data = simulate_entry_from_intraday(detail_code, entry_val, detail_row.get("盤前停損", ""))
+                            return {
+                                "entry": entry_val,
+                                "data": sim_data,
+                                "entry_time": sim_data.get("進場時間", "--"),
+                                "close": sim_data.get("模擬收盤價", ""),
+                                "close_pnl": sim_data.get("收盤模擬損益", ""),
+                                "close_ret": sim_data.get("收盤模擬報酬率%", ""),
+                                "close_result": sim_data.get("收盤模擬結果", "資料不足"),
+                                "high": sim_data.get("模擬最高價", ""),
+                                "high_pnl": sim_data.get("最高模擬損益", ""),
+                                "high_ret": sim_data.get("最高模擬報酬率%", ""),
+                                "high_result": sim_data.get("最高模擬結果", "資料不足"),
+                                "low": sim_data.get("模擬最低價", ""),
+                                "low_pnl": sim_data.get("最低模擬損益", ""),
+                                "low_ret": sim_data.get("最低模擬報酬率%", ""),
+                                "low_result": sim_data.get("最低模擬結果", "資料不足"),
+                            }
 
-                        if _entry > 0 and _high is not None:
-                            _high_pnl = round(_high - _entry, 2)
-                            _high_ret = round((_high - _entry) / _entry * 100, 2)
-                            _high_result = "上漲" if _high_pnl > 0 else ("下跌" if _high_pnl < 0 else "持平")
-                        else:
-                            _high_pnl = ""
-                            _high_ret = ""
-                            _high_result = ""
+                        sim_calc = _calc_sim(float(default_entry_num))
+                        sim_data = sim_calc["data"]
+                        _entry = sim_calc["entry"]
+                        _entry_time = sim_calc["entry_time"]
+                        _close = sim_calc["close"]
+                        _close_pnl = sim_calc["close_pnl"]
+                        _close_ret = sim_calc["close_ret"]
+                        _close_result = sim_calc["close_result"]
+                        _high = sim_calc["high"]
+                        _high_pnl = sim_calc["high_pnl"]
+                        _high_ret = sim_calc["high_ret"]
+                        _high_result = sim_calc["high_result"]
+                        _low = sim_calc["low"]
+                        _low_pnl = sim_calc["low_pnl"]
+                        _low_ret = sim_calc["low_ret"]
+                        _low_result = sim_calc["low_result"]
+
+                        sim_detail_row = detail_row.copy()
+                        sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
+                        sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
 
                         if st.session_state.mobile_mode:
-                            render_compare_matrix(detail_row, _entry)
-                            render_sim_matrix(_close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret)
+                            render_compare_matrix(detail_row)
+                            st.number_input("自訂模擬進場價", min_value=0.0, value=round(float(default_entry_num), 1), step=0.1, format="%.1f", key=f"custom_entry_mobile_{selected_detail_stock}")
+                            mobile_entry = float(st.session_state[f"custom_entry_mobile_{selected_detail_stock}"])
+                            sim_calc = _calc_sim(mobile_entry)
+                            sim_data = sim_calc["data"]
+                            _entry = sim_calc["entry"]
+                            _entry_time = sim_calc["entry_time"]
+                            _close = sim_calc["close"]
+                            _close_pnl = sim_calc["close_pnl"]
+                            _close_ret = sim_calc["close_ret"]
+                            _close_result = sim_calc["close_result"]
+                            _high = sim_calc["high"]
+                            _high_pnl = sim_calc["high_pnl"]
+                            _high_ret = sim_calc["high_ret"]
+                            _high_result = sim_calc["high_result"]
+                            _low = sim_calc["low"]
+                            _low_pnl = sim_calc["low_pnl"]
+                            _low_ret = sim_calc["low_ret"]
+                            _low_result = sim_calc["low_result"]
+                            sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
+                            sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
+                            render_sim_matrix(_entry_time, _close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret, _low, _low_result, _low_pnl, _low_ret)
 
                             mobile_tabs = st.tabs(["對照重點", "盤前明細", "盤後明細"])
                             with mobile_tabs[0]:
@@ -2099,6 +2261,9 @@ with tab2:
                                 top_e, top_f = st.columns(2)
                                 top_e.metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
                                 top_f.metric("模擬進場價", fmt_price(_entry))
+                                top_g, top_h = st.columns(2)
+                                top_g.metric("是否可成交", fmt_text(sim_detail_row.get("是否可成交", "")))
+                                top_h.metric("進場時間", fmt_text(_entry_time))
                             with mobile_tabs[1]:
                                 pre_cols_2 = st.columns(2)
                                 pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
@@ -2151,8 +2316,8 @@ with tab2:
                                 verify_cols = st.columns(4)
                                 verify_cols[0].metric("支撐驗證", fmt_text(detail_row.get("支撐驗證", "")))
                                 verify_cols[1].metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
-                                verify_cols[2].metric("停損觸發", fmt_text(detail_row.get("停損觸發", "")))
-                                verify_cols[3].metric("是否可成交", fmt_text(detail_row.get("是否可成交", "")))
+                                verify_cols[2].metric("停損觸發", fmt_text(sim_detail_row.get("停損觸發", "")))
+                                verify_cols[3].metric("是否可成交", fmt_text(sim_detail_row.get("是否可成交", "")))
 
                             with d2:
                                 with st.container(border=True):
@@ -2169,10 +2334,32 @@ with tab2:
 
                                 with st.container(border=True):
                                     st.markdown("###### 收盤模擬")
-                                    close_sim_cols = st.columns(3)
+                                    custom_entry_price = st.number_input("自訂模擬進場價", min_value=0.0, value=round(float(default_entry_num), 1), step=0.1, format="%.1f", key=f"custom_entry_desktop_{selected_detail_stock}")
+                                    desk_entry = float(custom_entry_price)
+                                    sim_calc = _calc_sim(desk_entry)
+                                    sim_data = sim_calc["data"]
+                                    _entry = sim_calc["entry"]
+                                    _entry_time = sim_calc["entry_time"]
+                                    _close = sim_calc["close"]
+                                    _close_pnl = sim_calc["close_pnl"]
+                                    _close_ret = sim_calc["close_ret"]
+                                    _close_result = sim_calc["close_result"]
+                                    _high = sim_calc["high"]
+                                    _high_pnl = sim_calc["high_pnl"]
+                                    _high_ret = sim_calc["high_ret"]
+                                    _high_result = sim_calc["high_result"]
+                                    _low = sim_calc["low"]
+                                    _low_pnl = sim_calc["low_pnl"]
+                                    _low_ret = sim_calc["low_ret"]
+                                    _low_result = sim_calc["low_result"]
+                                    sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
+                                    sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
+
+                                    close_sim_cols = st.columns(4)
                                     close_sim_cols[0].metric("模擬進場價", fmt_price(_entry))
-                                    close_sim_cols[1].metric("模擬收盤價", fmt_price(_close))
-                                    close_sim_cols[2].metric("收盤模擬結果", fmt_text(_close_result))
+                                    close_sim_cols[1].metric("進場時間", fmt_text(_entry_time))
+                                    close_sim_cols[2].metric("模擬收盤價", fmt_price(_close))
+                                    close_sim_cols[3].metric("收盤模擬結果", fmt_text(_close_result))
 
                                     close_sim_cols_2 = st.columns(3)
                                     close_sim_cols_2[0].metric("收盤模擬損益", fmt_price(_close_pnl))
@@ -2180,16 +2367,21 @@ with tab2:
                                     close_sim_cols_2[2].metric("狀態", "收盤")
 
                                 with st.container(border=True):
-                                    st.markdown("###### 最高價模擬")
+                                    st.markdown("###### 最高 / 最低價模擬")
                                     high_sim_cols = st.columns(3)
                                     high_sim_cols[0].metric("模擬最高價", fmt_price(_high))
                                     high_sim_cols[1].metric("最高模擬結果", fmt_text(_high_result))
-                                    high_sim_cols[2].metric("狀態", "最高價")
+                                    high_sim_cols[2].metric("最高模擬報酬率%", fmt_pct(_high_ret))
 
                                     high_sim_cols_2 = st.columns(3)
                                     high_sim_cols_2[0].metric("最高模擬損益", fmt_price(_high_pnl))
-                                    high_sim_cols_2[1].metric("最高模擬報酬率%", fmt_pct(_high_ret))
-                                    high_sim_cols_2[2].metric("對照", "盤中")
+                                    high_sim_cols_2[1].metric("模擬最低價", fmt_price(_low))
+                                    high_sim_cols_2[2].metric("最低模擬結果", fmt_text(_low_result))
+
+                                    high_sim_cols_3 = st.columns(3)
+                                    high_sim_cols_3[0].metric("最低模擬損益", fmt_price(_low_pnl))
+                                    high_sim_cols_3[1].metric("最低模擬報酬率%", fmt_pct(_low_ret))
+                                    high_sim_cols_3[2].metric("對照", "成交後")
                 else:
                     st.caption("目前沒有可顯示的對照結果。")
 
@@ -2200,7 +2392,7 @@ with tab3:
 
     t1,t2,t3,t4 = st.columns(4)
     trade_stock = t1.text_input("股票代碼", placeholder="例如 8046 或 8046.TW")
-    trade_price = t2.number_input("成交價格", min_value=0.0, value=0.0, step=0.01)
+    trade_price = t2.number_input("成交價格", min_value=0.0, value=0.0, step=0.1, format="%.1f")
     trade_qty = t3.number_input("數量", min_value=1, value=1000, step=1)
     trade_action = t4.selectbox("動作", ["買進","賣出"])
     trade_note = st.text_input("備註", placeholder="例如：盤中追價 / 回測進場 / 手動出場")
