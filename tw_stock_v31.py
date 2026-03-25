@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v61")
+st.set_page_config(layout="wide", page_title="台股短線系統 v62")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v61</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v62</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v61")
+st.title("🚀 台股短線系統 v62")
 
 def inject_responsive_css():
     st.markdown("""
@@ -1596,15 +1596,13 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
             sim_high_pnl = sim_data.get("最高模擬損益", "")
             sim_high_ret = sim_data.get("最高模擬報酬率%", "")
             sim_high_result = sim_data.get("最高模擬結果", "資料不足")
+            # V62 修正：
+            # 真實盤後資料（post_close / post_high / post_low）不可被模擬結果覆蓋或清空。
+            # 模擬結果只寫入模擬欄位，盤後欄位永遠保留真實盤後資料。
             if fillable == "可成交":
-                post_close = sim_data.get("模擬收盤價", post_close)
-                post_high = sim_data.get("模擬最高價", post_high)
-                post_low = sim_data.get("模擬最低價", post_low)
                 stop_trigger = sim_data.get("停損觸發", stop_trigger)
             elif fillable == "未成交":
-                post_close = ""
-                post_high = ""
-                post_low = ""
+                pass
                 stop_trigger = "--"
         except Exception:
             pass
