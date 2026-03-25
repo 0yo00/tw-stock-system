@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v59")
+st.set_page_config(layout="wide", page_title="台股短線系統 v60")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v59</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v60</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v59")
+st.title("🚀 台股短線系統 v60")
 
 def inject_responsive_css():
     st.markdown("""
@@ -1391,8 +1391,63 @@ def get_latest_ohlc_for_compare(symbol_code: str):
     except Exception:
         return {"close": "", "high": "", "low": ""}
 
+
+def get_post_market_status(symbol_code: str = "2330.TW"):
+    """
+    盤後狀態三段式：
+    1) 13:30 前：盤中
+    2) 13:30~14:00：盤後資料更新中
+    3) 14:00 後：需做資料完整 + 二次一致確認，才視為正式盤後
+    """
+    now = datetime.now()
+    hhmm = now.hour * 100 + now.minute
+
+    if hhmm < 1330:
+        return {
+            "stage": "盤中",
+            "ready": False,
+            "message": "尚未收盤，盤後資料尚不可用。"
+        }
+
+    if 1330 <= hhmm < 1400:
+        return {
+            "stage": "更新中",
+            "ready": False,
+            "message": "已收盤，但目前仍在盤後資料更新期（13:30～14:00），暫不直接顯示正式盤後資料。"
+        }
+
+    try:
+        first = get_latest_ohlc_for_compare(symbol_code)
+        second = get_latest_ohlc_for_compare(symbol_code)
+
+        required = ["close", "high", "low"]
+        complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+        consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
+
+        if complete and consistent:
+            return {
+                "stage": "正式盤後",
+                "ready": True,
+                "message": "盤後資料已完成二次確認，顯示正式盤後資料。"
+            }
+
+        return {
+            "stage": "更新中",
+            "ready": False,
+            "message": "已過 14:00，但盤後資料仍未通過完整/一致檢查，暫以『更新中』處理。"
+        }
+    except Exception:
+        return {
+            "stage": "更新中",
+            "ready": False,
+            "message": "盤後資料檢查失敗，暫以『更新中』處理。"
+        }
+
 def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
     compare_rows = []
+    market_status = get_post_market_status()
+    post_ready = market_status.get("ready", False)
+    post_stage = market_status.get("stage", "更新中")
     for pre in rows:
         code = str(pre.get("股票代碼", "") or pre.get("股票", "")).split("（")[0].strip()
         if not code:
@@ -1437,6 +1492,41 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
 
         pre_con = str(pre.get("結論", ""))
         now_con = str(now_item.get("結論", ""))
+        if not post_ready:
+            compare_rows.append({
+                "股票": pre.get("股票", code),
+                "股票代碼": code,
+                "盤前快照時間": pre.get("時間", ""),
+                "盤前收盤": pre.get("收盤", ""),
+                "盤前支撐": pre.get("支撐", ""),
+                "盤前壓力": pre.get("短期壓力", ""),
+                "盤前建議進場": pre.get("進場", ""),
+                "盤前停損": pre.get("停損", ""),
+                "盤前風報比": pre.get("風報比", ""),
+                "盤前結論": pre_con,
+                "盤前訊號": pre.get("交易訊號", ""),
+                "盤後收盤": "",
+                "盤後最高": "",
+                "盤後最低": "",
+                "盤後風報比": "",
+                "盤後結論": f"{post_stage}",
+                "盤後訊號": "⏳更新中",
+                "支撐驗證": "更新中",
+                "壓力驗證": "更新中",
+                "停損觸發": "更新中",
+                "是否可成交": "更新中",
+                "模擬進場價": pre.get("進場", ""),
+                "模擬收盤價": "",
+                "收盤模擬損益": "",
+                "收盤模擬報酬率%": "",
+                "收盤模擬結果": "更新中",
+                "模擬最高價": "",
+                "最高模擬損益": "",
+                "最高模擬報酬率%": "",
+                "最高模擬結果": "更新中",
+                "變化判斷": "更新中"
+            })
+            continue
         pre_sig = str(pre.get("交易訊號", ""))
         now_sig = str(now_item.get("交易訊號", ""))
 
@@ -2123,6 +2213,11 @@ with tab2:
             chosen_label = st.selectbox("選擇盤前名單", options, index=0, key="batch_pre_group")
             chosen_group = pre_groups[options.index(chosen_label)]
             st.caption("按下按鈕後，會直接抓這組盤前名單的當前資料，生成盤前 vs 盤後對照，不必先手動再存盤後快照。")
+            post_market_status = get_post_market_status()
+            if post_market_status.get("ready", False):
+                st.success(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
+            else:
+                st.warning(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
 
             with st.expander("編輯這次盤前名單", expanded=False):
                 st.caption("可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
