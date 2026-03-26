@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v78")
+st.set_page_config(layout="wide", page_title="台股短線系統 v79")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v78</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v79</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v78")
+st.title("🚀 台股短線系統 v79")
 
 def inject_responsive_css():
     st.markdown("""
@@ -2426,23 +2426,34 @@ with tab2:
             with c2:
                 type_options = ["全部", "盤前", "盤後"]
                 hist_type = st.selectbox("選擇類型", type_options, index=0, key="hist_type")
-            with c3:
-                date_options = sorted(pd.to_datetime(df_snap["時間"], errors="coerce").dt.strftime("%Y-%m-%d").dropna().unique().tolist(), reverse=True)
-                hist_date = st.selectbox("選擇日期", date_options, index=0, key="hist_date") if date_options else ""
 
-            hist = df_snap.copy()
-            if "類型" in hist.columns:
-                hist = hist[hist["類型"].isin(["盤前", "盤後"])]
+            hist_base = df_snap.copy()
+            if "類型" in hist_base.columns:
+                hist_base = hist_base[hist_base["類型"].isin(["盤前", "盤後"])]
             if hist_stock != "全部":
-                hist = hist[hist["股票"] == hist_stock]
+                hist_base = hist_base[hist_base["股票"] == hist_stock]
             if hist_type != "全部":
-                hist = hist[hist["類型"] == hist_type]
-            if hist_date:
-                hist = hist[pd.to_datetime(hist["時間"], errors="coerce").dt.strftime("%Y-%m-%d") == hist_date]
-            hist = hist.sort_values("時間", ascending=False)
+                hist_base = hist_base[hist_base["類型"] == hist_type]
+
+            batch_options = []
+            if not hist_base.empty and "時間" in hist_base.columns:
+                batch_counts = hist_base.groupby("時間").size().sort_index(ascending=False)
+                batch_options = [f"{t}｜{int(n)}檔" for t, n in batch_counts.items()]
+
+            with c3:
+                hist_batch = st.selectbox("選擇儲存時段", batch_options, index=0, key="hist_batch") if batch_options else ""
+
+            hist = hist_base.copy()
+            if hist_batch:
+                selected_time = hist_batch.split("｜")[0]
+                hist = hist[hist["時間"].astype(str) == selected_time]
+            else:
+                selected_time = ""
+
+            hist = hist.sort_values(["時間", "股票"], ascending=[False, True])
 
             if not hist.empty:
-                st.caption(f"{hist_date} 共 {len(hist)} 檔")
+                st.caption(f"{selected_time} 共 {len(hist)} 檔")
             snap_cols = [c for c in ["時間","類型","股票","收盤","進場","停損","短期壓力","中繼目標","突破目標","風報比","結論","交易訊號"] if c in hist.columns]
             st.dataframe(hist[snap_cols], use_container_width=True, hide_index=True)
 
