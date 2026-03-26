@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v72")
+st.set_page_config(layout="wide", page_title="台股短線系統 v75")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v72</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v75</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v72")
+st.title("🚀 台股短線系統 v75")
 
 def inject_responsive_css():
     st.markdown("""
@@ -2486,11 +2486,65 @@ with tab2:
                     st.dataframe(compare_batch_df[overview_cols], use_container_width=True, hide_index=True)
 
                     with st.expander("單股詳細對比", expanded=False):
-                        detail_top1, detail_top2 = st.columns([2,1])
                         detail_options = compare_batch_df["股票"].tolist()
-                        selected_detail_stock = detail_top1.selectbox("選擇要查看的股票", detail_options, index=0, key="detail_compare_stock")
+
+                        if "detail_compare_stock_idx" not in st.session_state:
+                            st.session_state.detail_compare_stock_idx = 0
+                        if "detail_compare_stock" not in st.session_state and detail_options:
+                            st.session_state.detail_compare_stock = detail_options[0]
+
+                        if not detail_options:
+                            st.session_state.detail_compare_stock_idx = 0
+
+                        def _apply_detail_idx():
+                            if detail_options:
+                                idx = max(0, min(st.session_state.detail_compare_stock_idx, len(detail_options) - 1))
+                                st.session_state.detail_compare_stock_idx = idx
+                                st.session_state.detail_compare_stock = detail_options[idx]
+
+                        def _detail_prev():
+                            if detail_options:
+                                st.session_state.detail_compare_stock_idx = max(0, st.session_state.detail_compare_stock_idx - 1)
+                                _apply_detail_idx()
+
+                        def _detail_next():
+                            if detail_options:
+                                st.session_state.detail_compare_stock_idx = min(len(detail_options) - 1, st.session_state.detail_compare_stock_idx + 1)
+                                _apply_detail_idx()
+
+                        # 若目前 session 裡的股票不存在於新列表，才重設；否則保留使用者手選結果
+                        if detail_options:
+                            current_selected = st.session_state.get("detail_compare_stock", detail_options[0])
+                            if current_selected not in detail_options:
+                                st.session_state.detail_compare_stock_idx = min(st.session_state.detail_compare_stock_idx, len(detail_options) - 1)
+                                _apply_detail_idx()
+                            else:
+                                st.session_state.detail_compare_stock_idx = detail_options.index(current_selected)
+
+                        nav_left, nav_mid, nav_right, metric_col = st.columns([1.2, 5.6, 1.2, 2.2])
+
+                        with nav_left:
+                            st.button("⬅ 上一檔", use_container_width=True, key="detail_prev_stock", on_click=_detail_prev)
+
+                        with nav_mid:
+                            selected_detail_stock = st.selectbox(
+                                "選擇要查看的股票",
+                                detail_options,
+                                key="detail_compare_stock"
+                            )
+                            if detail_options and selected_detail_stock in detail_options:
+                                st.session_state.detail_compare_stock_idx = detail_options.index(selected_detail_stock)
+
+                            if detail_options:
+                                current_pos = st.session_state.detail_compare_stock_idx + 1
+                                st.caption(f"目前第 {current_pos} / {len(detail_options)} 檔：{selected_detail_stock}")
+
+                        with nav_right:
+                            st.button("下一檔 ➡", use_container_width=True, key="detail_next_stock", on_click=_detail_next)
+
+                        selected_detail_stock = st.session_state.get("detail_compare_stock", detail_options[0] if detail_options else "")
                         detail_row = compare_batch_df[compare_batch_df["股票"] == selected_detail_stock].iloc[0].to_dict()
-                        detail_top2.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
+                        metric_col.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
                         render_compare_status_cards(detail_row)
                         default_entry_val = detail_row.get("模擬進場價", detail_row.get("盤前建議進場", ""))
                         try:
