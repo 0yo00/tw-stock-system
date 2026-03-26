@@ -2,7 +2,7 @@
 import json
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v62")
+st.set_page_config(layout="wide", page_title="台股短線系統 v70")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v62</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v70</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v62")
+st.title("🚀 台股短線系統 v70")
 
 def inject_responsive_css():
     st.markdown("""
@@ -295,6 +295,9 @@ def render_compare_matrix(detail_row):
         ("建議進場", fmt_price(detail_row.get("盤前建議進場", "")), fmt_price(detail_row.get("模擬進場價", detail_row.get("盤前建議進場", "")))),
         ("停損", fmt_price(detail_row.get("盤前停損", "")), fmt_text(detail_row.get("停損觸發", ""))),
         ("風報比", fmt_price(detail_row.get("盤前風報比", "")), fmt_price(detail_row.get("盤後風報比", ""))),
+        ("價量結論", "盤前未記錄", fmt_text(detail_row.get("價量結論", ""))),
+        ("價格變化", "盤前基準", fmt_text(detail_row.get("價格變化", ""))),
+        ("結構變化", "盤前基準", fmt_text(detail_row.get("結構變化", detail_row.get("變化判斷", "")))),
         ("結論", fmt_text(detail_row.get("盤前結論", "")), fmt_text(detail_row.get("盤後結論", ""))),
         ("訊號", fmt_text(detail_row.get("盤前訊號", "")), fmt_text(detail_row.get("盤後訊號", ""))),
     ]
@@ -636,6 +639,109 @@ def build_reason(df: pd.DataFrame, breakout_status: str):
     if not reasons: reasons.append("條件普通")
     return "、".join(reasons[:3]), round(rsi, 1)
 
+def price_volume_analysis(df: pd.DataFrame):
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    close = float(last["Close"]); prev_close = float(prev["Close"])
+    open_ = float(last["Open"]); high = float(last["High"]); low = float(last["Low"])
+    vol = float(last["Volume"]); prev_vol = float(prev["Volume"]) if pd.notna(prev["Volume"]) else vol
+    vol5 = float(df["vol5"].iloc[-1]) if "vol5" in df.columns and pd.notna(df["vol5"].iloc[-1]) else vol
+
+    price_up = close > prev_close
+    price_down = close < prev_close
+    vol_up = vol > prev_vol and vol5 and vol / vol5 >= 1.0
+    vol_down = vol < prev_vol or (vol5 and vol / vol5 < 1.0)
+
+    gap_up = open_ > prev_close * 1.01
+    gap_down = open_ < prev_close * 0.99
+    close_near_low = close <= low + (high - low) * 0.25 if high > low else False
+    close_near_high = close >= high - (high - low) * 0.25 if high > low else False
+    red_candle = close < open_
+    green_candle = close > open_
+
+    reasons = []
+    if gap_up and red_candle and price_down and vol_up and close_near_low:
+        return "開高走低爆量", "紅燈", ["開盤跳高後一路走弱", "收盤接近日低", "量能放大但價格轉弱"]
+    if gap_up and green_candle and price_up and vol_up and close_near_high:
+        return "跳空上漲爆量", "綠燈", ["跳空上漲", "收盤接近日高", "量價同步轉強"]
+
+    if price_up and vol_up:
+        return "價漲量增", "綠燈", ["價格上漲且量能放大", "多方動能延續", "續強機率較高"]
+    if price_up and vol_down:
+        return "價漲量縮", "黃燈", ["價格上漲但量能未跟上", "續航待確認", "不宜過度追價"]
+    if price_down and vol_up:
+        return "價跌量增", "紅燈", ["價格下跌且量能放大", "賣壓增強", "偏空解讀"]
+    if price_down and vol_down:
+        return "價跌量縮", "黃燈", ["價格回落但量能收斂", "弱勢整理或跌勢暫緩", "等待下一步方向"]
+
+    if gap_down and price_down:
+        return "跳空下跌", "紅燈", ["開盤跳空轉弱", "市場承接偏弱", "先保守看待"]
+
+    return "量價中性", "黃燈", ["價量沒有明顯共振", "暫以觀察為主", "等待更多確認"]
+
+def build_judgement_reasons(row: dict):
+    reasons = []
+    pv = row.get("價量結論", "")
+    if pv:
+        reasons.append(f"價量：{pv}")
+    if row.get("壓力驗證", "") == "有效突破":
+        reasons.append("壓力有效突破，加分")
+    elif row.get("壓力驗證", "") == "遇壓回落":
+        reasons.append("遇壓回落，扣分")
+    if row.get("支撐驗證", "") == "跌破支撐":
+        reasons.append("跌破支撐，扣分")
+    elif row.get("支撐驗證", "") == "守住支撐":
+        reasons.append("守住支撐，維持結構")
+    if row.get("停損觸發", "") == "已觸發":
+        reasons.append("停損已觸發，扣分")
+    try:
+        kd_k = float(row.get("KD_K", 0)); kd_d = float(row.get("KD_D", 0))
+        if kd_k > kd_d:
+            reasons.append("KD 黃金交叉/偏多，加分")
+        else:
+            reasons.append("KD 未轉強，保守看待")
+    except Exception:
+        pass
+    try:
+        rr = float(row.get("風報比", 0))
+        if rr >= 1.8:
+            reasons.append("風報比達標，加分")
+        elif rr < 1.2:
+            reasons.append("風報比偏弱，扣分")
+    except Exception:
+        pass
+    if not reasons:
+        reasons.append("目前沒有足夠理由，暫以觀察處理")
+    return reasons[:4]
+
+def render_reason_block(row: dict, title="判斷理由"):
+    reasons = build_judgement_reasons(row)
+    html = "".join(f"<li>{html_escape(x)}</li>" for x in reasons)
+    st.markdown(f"""
+    <div style="border:1px solid #334155;border-radius:12px;padding:12px 14px;background:#0b1220;margin-top:8px;">
+      <div style="font-size:15px;font-weight:700;color:#e2e8f0;margin-bottom:6px;">{html_escape(title)}</div>
+      <ul style="margin:0;padding-left:18px;color:#cbd5e1;line-height:1.7;">{html}</ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+def compare_price_change(pre_close, post_close):
+    try:
+        pre = float(pre_close); post = float(post_close)
+        if post > pre:
+            return "上漲"
+        elif post < pre:
+            return "下跌"
+        return "持平"
+    except Exception:
+        return "資料不足"
+
+def render_compare_status_cards(detail_row: dict, title: str = "對照摘要"):
+    a, b, c = st.columns(3)
+    a.metric("價量結論", fmt_text(detail_row.get("價量結論", "")) or "--")
+    b.metric("價格變化", fmt_text(detail_row.get("價格變化", detail_row.get("價格狀態", ""))) or "--")
+    b.caption("單純比較盤前收盤 vs 目前/盤後收盤")
+    c.metric("結構變化", fmt_text(detail_row.get("結構變化", detail_row.get("變化判斷", ""))) or "--")
+    c.caption("綜合支撐、壓力、訊號、風報比後的結構判讀")
 
 def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
     name_map = name_map or load_name_map()
@@ -706,6 +812,7 @@ def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = Non
     )
     vol_change_pct = round((vol - vol_prev) / vol_prev * 100, 2) if vol_prev else 0.0
     vol_trend = "量增" if vol_change_pct > 0 else "量縮" if vol_change_pct < 0 else "持平"
+    pv_label, pv_light, pv_reasons = price_volume_analysis(df)
     dist_support = round((close - support) / close * 100, 1) if close else 0
     dist_resistance = round((resistance - close) / close * 100, 1) if close else 0
     dist_target = round((final_target - close) / close * 100, 1) if close else 0
@@ -719,6 +826,7 @@ def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = Non
         "進場": entry, "停損": stop, "目標": short_target, "風報比": rr, "ATR": atr,
         "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1), "乖離率5日": round(bias5, 2),
         "成交量": int(vol), "昨量": int(vol_prev), "量比5日": vol_ratio, "量能變化": vol_trend, "量能變化%": vol_change_pct,
+        "價量結論": pv_label, "價量燈號": pv_light, "價量理由": "｜".join(pv_reasons),
         "選股理由": reason,
         "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
         "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
@@ -884,19 +992,21 @@ def signal_light_pack(row: pd.Series):
     trend_light = "綠燈" if row["結論"] in ["看多", "中性偏多"] else "黃燈" if row["結論"] == "中性" else "紅燈"
     entry_light = "綠燈" if row["交易訊號"] == "🔥進場" else "黃燈" if row["交易訊號"] in ["👀觀察", "⏳等待"] else "紅燈"
     volume_light = "綠燈" if row["量能變化"] == "量增" and row["量比5日"] >= 1 else "黃燈" if row["量比5日"] >= 0.8 else "紅燈"
+    pv_light = row.get("價量燈號", "黃燈")
     kd_light = "紅燈" if row["KD_K"] >= 80 else "綠燈" if row["KD_K"] > row["KD_D"] else "黃燈"
     rr_light = "綠燈" if row["風報比"] >= 1.8 else "黃燈" if row["風報比"] >= 1.2 else "紅燈"
     return {
         "趨勢燈號": trend_light,
         "進場燈號": entry_light,
         "量能燈號": volume_light,
+        "價量燈號": pv_light,
         "KD燈號": kd_light,
         "風報燈號": rr_light
     }
 
 def render_signal_lights(row: pd.Series):
     lights = signal_light_pack(row)
-    cols = st.columns(5)
+    cols = st.columns(len(lights))
     for col, (name, level) in zip(cols, lights.items()):
         color = light_color(level)
         col.markdown(
@@ -1392,60 +1502,110 @@ def get_latest_ohlc_for_compare(symbol_code: str):
         return {"close": "", "high": "", "low": ""}
 
 
-def get_post_market_status(symbol_code: str = "2330.TW"):
+def get_post_market_status(symbol_code: str = "2330.TW", snapshot_time_str: str = ""):
     """
-    盤後狀態三段式：
-    1) 13:30 前：盤中
-    2) 13:30~14:00：盤後資料更新中
-    3) 14:00 後：需做資料完整 + 二次一致確認，才視為正式盤後
+    盤後判定改成「以快照日期為主、以市場資料日期為輔」：
+    1) 若市場資料最後日期 > 快照日期：代表已經跨到之後交易日，這份快照一定已是正式盤後
+    2) 若市場資料最後日期 == 快照日期：再看最後一筆時間是否 >= 13:30
+    3) 若抓不到分時資料：不亂判，先回更新中
+    這樣可避免：
+    - 只看伺服器時間造成時區誤判
+    - 只看 HH:MM 卻忽略日期，導致「03-25 13:24」把 03-24 快照誤判成盤中
     """
-    now = datetime.now()
-    hhmm = now.hour * 100 + now.minute
-
-    if hhmm < 1330:
-        return {
-            "stage": "盤中",
-            "ready": False,
-            "message": "尚未收盤，盤後資料尚不可用。"
-        }
-
-    if 1330 <= hhmm < 1400:
-        return {
-            "stage": "更新中",
-            "ready": False,
-            "message": "已收盤，但目前仍在盤後資料更新期（13:30～14:00），暫不直接顯示正式盤後資料。"
-        }
+    snapshot_date = None
+    if snapshot_time_str:
+        try:
+            snapshot_date = pd.to_datetime(snapshot_time_str, errors="coerce")
+            if pd.notna(snapshot_date):
+                snapshot_date = snapshot_date.date()
+        except Exception:
+            snapshot_date = None
 
     try:
-        first = get_latest_ohlc_for_compare(symbol_code)
-        second = get_latest_ohlc_for_compare(symbol_code)
-
-        required = ["close", "high", "low"]
-        complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
-        consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
-
-        if complete and consistent:
+        df_intra = download_intraday(symbol_code)
+        if df_intra is None or df_intra.empty or "Datetime" not in df_intra.columns:
             return {
-                "stage": "正式盤後",
-                "ready": True,
-                "message": "盤後資料已完成二次確認，顯示正式盤後資料。"
+                "stage": "更新中",
+                "ready": False,
+                "message": "抓不到可用的分時資料，暫不直接判定盤後。"
             }
 
+        last_dt = pd.to_datetime(df_intra["Datetime"].iloc[-1], errors="coerce")
+        if pd.isna(last_dt):
+            return {
+                "stage": "更新中",
+                "ready": False,
+                "message": "分時資料最後時間無法辨識，暫不直接判定盤後。"
+            }
+
+        market_clock = last_dt.strftime("%m-%d %H:%M")
+        market_date = last_dt.date()
+        hhmm = int(last_dt.hour) * 100 + int(last_dt.minute)
+
+        # 最關鍵修正：先看「市場資料日期」與「快照日期」
+        if snapshot_date is not None and market_date > snapshot_date:
+            first = get_latest_ohlc_for_compare(symbol_code)
+            second = get_latest_ohlc_for_compare(symbol_code)
+            required = ["close", "high", "low"]
+            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
+            if complete and consistent:
+                return {
+                    "stage": "正式盤後",
+                    "ready": True,
+                    "message": f"依行情資料時間 {market_clock} 判定：市場資料日期已晚於快照日期，這份快照視為正式盤後。"
+                }
+            return {
+                "stage": "更新中",
+                "ready": False,
+                "message": f"依行情資料時間 {market_clock} 判定：市場資料日期已晚於快照日期，但盤後資料尚未通過完整/一致檢查。"
+            }
+
+        # 若市場資料日期與快照日期相同，才看是否已過 13:30
+        if hhmm < 1330:
+            return {
+                "stage": "盤中",
+                "ready": False,
+                "message": f"依行情資料時間 {market_clock} 判定：尚未收盤，盤後資料尚不可用。"
+            }
+
+        try:
+            first = get_latest_ohlc_for_compare(symbol_code)
+            second = get_latest_ohlc_for_compare(symbol_code)
+
+            required = ["close", "high", "low"]
+            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
+
+            if complete and consistent:
+                return {
+                    "stage": "正式盤後",
+                    "ready": True,
+                    "message": f"依行情資料時間 {market_clock} 判定已收盤，且盤後資料完成二次確認。"
+                }
+
+            return {
+                "stage": "更新中",
+                "ready": False,
+                "message": f"依行情資料時間 {market_clock} 判定已收盤，但盤後資料尚未通過完整/一致檢查。"
+            }
+        except Exception:
+            return {
+                "stage": "更新中",
+                "ready": False,
+                "message": f"依行情資料時間 {market_clock} 判定已收盤，但盤後檢查失敗，暫以更新中處理。"
+            }
+
+    except Exception as e:
         return {
             "stage": "更新中",
             "ready": False,
-            "message": "已過 14:00，但盤後資料仍未通過完整/一致檢查，暫以『更新中』處理。"
-        }
-    except Exception:
-        return {
-            "stage": "更新中",
-            "ready": False,
-            "message": "盤後資料檢查失敗，暫以『更新中』處理。"
+            "message": f"盤後狀態判定失敗：{e}"
         }
 
-def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
+def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot_time_str=""):
     compare_rows = []
-    market_status = get_post_market_status()
+    market_status = get_post_market_status(snapshot_time_str=snapshot_time_str)
     post_ready = market_status.get("ready", False)
     post_stage = market_status.get("stage", "更新中")
     for pre in rows:
@@ -1486,6 +1646,10 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
                 "最高模擬損益": "",
                 "最高模擬報酬率%": "",
                 "最高模擬結果": "資料不足",
+                "價格變化": "資料不足",
+                "結構變化": "資料不足",
+                "價量結論": "資料不足",
+                "判斷理由": "資料不足",
                 "變化判斷": "資料不足"
             })
             continue
@@ -1493,6 +1657,12 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
         pre_con = str(pre.get("結論", ""))
         now_con = str(now_item.get("結論", ""))
         if not post_ready:
+            current_reason = []
+            pv_now = now_item.get("價量結論", "")
+            if pv_now:
+                current_reason.append(f"價量：{pv_now}")
+            current_reason.append("目前仍在盤中/盤後更新期")
+            current_reason.append("正式價格變化與結構變化需待盤後確認")
             compare_rows.append({
                 "股票": pre.get("股票", code),
                 "股票代碼": code,
@@ -1524,7 +1694,11 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
                 "最高模擬損益": "",
                 "最高模擬報酬率%": "",
                 "最高模擬結果": "更新中",
-                "變化判斷": "更新中"
+                "價格變化": "待盤後",
+                "結構變化": "待盤後",
+                "價量結論": now_item.get("價量結論", ""),
+                "判斷理由": "｜".join(current_reason),
+                "變化判斷": "待盤後"
             })
             continue
         pre_sig = str(pre.get("交易訊號", ""))
@@ -1634,6 +1808,27 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
             judge = "變弱"
         else:
             judge = "持平"
+        price_change = compare_price_change(pre.get("收盤", ""), post_close)
+        compare_reason = []
+        pv_now = now_item.get("價量結論", "")
+        if pv_now:
+            compare_reason.append(f"價量：{pv_now}")
+        if resistance_check == "有效突破":
+            compare_reason.append("壓力有效突破，加分")
+        elif resistance_check == "遇壓回落":
+            compare_reason.append("量能放大但收在壓力下，扣分")
+        if support_check == "跌破支撐":
+            compare_reason.append("收盤/低點跌破支撐，扣分")
+        if stop_trigger == "已觸發":
+            compare_reason.append("停損觸發，扣分")
+        if rr_diff > 0.15:
+            compare_reason.append("盤後風報比優於盤前，加分")
+        elif rr_diff < -0.15:
+            compare_reason.append("盤後風報比低於盤前，扣分")
+        if pre_sig != now_sig:
+            compare_reason.append(f"交易訊號由 {pre_sig} 變為 {now_sig}")
+        if not compare_reason:
+            compare_reason.append("整體結構變化不大，暫列持平")
 
         compare_rows.append({
             "股票": pre.get("股票", code),
@@ -1666,7 +1861,11 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map):
             "最高模擬損益": sim_high_pnl,
             "最高模擬報酬率%": sim_high_ret,
             "最高模擬結果": sim_high_result,
-            "變化判斷": judge
+            "價格變化": price_change,
+            "結構變化": judge,
+            "變化判斷": judge,
+            "價量結論": now_item.get("價量結論", ""),
+            "判斷理由": "｜".join(compare_reason)
         })
     return pd.DataFrame(compare_rows)
 
@@ -2030,6 +2229,10 @@ with tab1:
 
             st.markdown("#### 訊號燈號")
             render_signal_lights(row)
+            pv_a, pv_b = st.columns(2)
+            pv_a.metric("價量結論", row.get("價量結論", ""))
+            pv_b.metric("價量燈號", row.get("價量燈號", ""))
+            render_reason_block(row, "本檔判斷理由")
 
             with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
                 chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
@@ -2103,7 +2306,8 @@ with tab2:
                 type_options = ["全部", "盤前", "盤後"]
                 hist_type = st.selectbox("選擇類型", type_options, index=0, key="hist_type")
             with c3:
-                hist_n = st.selectbox("顯示筆數", [20, 50, 100, 200], index=1, key="hist_n")
+                date_options = sorted(pd.to_datetime(df_snap["時間"], errors="coerce").dt.strftime("%Y-%m-%d").dropna().unique().tolist(), reverse=True)
+                hist_date = st.selectbox("選擇日期", date_options, index=0, key="hist_date") if date_options else ""
 
             hist = df_snap.copy()
             if "類型" in hist.columns:
@@ -2112,8 +2316,12 @@ with tab2:
                 hist = hist[hist["股票"] == hist_stock]
             if hist_type != "全部":
                 hist = hist[hist["類型"] == hist_type]
-            hist = hist.sort_values("時間", ascending=False).head(hist_n)
+            if hist_date:
+                hist = hist[pd.to_datetime(hist["時間"], errors="coerce").dt.strftime("%Y-%m-%d") == hist_date]
+            hist = hist.sort_values("時間", ascending=False)
 
+            if not hist.empty:
+                st.caption(f"{hist_date} 共 {len(hist)} 檔")
             snap_cols = [c for c in ["時間","類型","股票","收盤","進場","停損","短期壓力","中繼目標","突破目標","風報比","結論","交易訊號"] if c in hist.columns]
             st.dataframe(hist[snap_cols], use_container_width=True, hide_index=True)
 
@@ -2211,7 +2419,7 @@ with tab2:
             chosen_label = st.selectbox("選擇盤前名單", options, index=0, key="batch_pre_group")
             chosen_group = pre_groups[options.index(chosen_label)]
             st.caption("按下按鈕後，會直接抓這組盤前名單的當前資料，生成盤前 vs 盤後對照，不必先手動再存盤後快照。")
-            post_market_status = get_post_market_status()
+            post_market_status = get_post_market_status(snapshot_time_str=chosen_group["時間"])
             if post_market_status.get("ready", False):
                 st.success(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
             else:
@@ -2235,7 +2443,7 @@ with tab2:
 
             b1, b2 = st.columns(2)
             if b1.button("產生盤後資訊對照", use_container_width=True):
-                compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map)
+                compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map, snapshot_time_str=chosen_group["時間"])
                 st.session_state["batch_compare_df"] = compare_batch_df
                 st.session_state["batch_compare_label"] = chosen_label
 
@@ -2249,14 +2457,14 @@ with tab2:
                 compare_batch_df = st.session_state["batch_compare_df"]
                 if not compare_batch_df.empty:
                     summary1, summary2, summary3 = st.columns(3)
-                    summary1.metric("變強", int((compare_batch_df["變化判斷"] == "變強").sum()))
-                    summary2.metric("持平", int((compare_batch_df["變化判斷"] == "持平").sum()))
-                    summary3.metric("變弱", int((compare_batch_df["變化判斷"] == "變弱").sum()))
+                    summary1.metric("結構變強", int((compare_batch_df["結構變化"] == "變強").sum()))
+                    summary2.metric("結構持平", int((compare_batch_df["結構變化"] == "持平").sum()))
+                    summary3.metric("結構變弱", int((compare_batch_df["結構變化"] == "變弱").sum()))
 
                     st.markdown("##### 總覽")
                     overview_cols = [c for c in [
-                        "股票","股票代碼","盤前收盤","盤後收盤","收盤模擬報酬率%","最高模擬報酬率%",
-                        "支撐驗證","壓力驗證","停損觸發","變化判斷"
+                        "股票","股票代碼","價量結論","價格變化","結構變化","盤前收盤","盤後收盤","收盤模擬報酬率%","最高模擬報酬率%",
+                        "支撐驗證","壓力驗證","停損觸發"
                     ] if c in compare_batch_df.columns]
                     st.dataframe(compare_batch_df[overview_cols], use_container_width=True, hide_index=True)
 
@@ -2265,7 +2473,8 @@ with tab2:
                         detail_options = compare_batch_df["股票"].tolist()
                         selected_detail_stock = detail_top1.selectbox("選擇要查看的股票", detail_options, index=0, key="detail_compare_stock")
                         detail_row = compare_batch_df[compare_batch_df["股票"] == selected_detail_stock].iloc[0].to_dict()
-                        detail_top2.metric("變化判斷", detail_row.get("變化判斷", ""))
+                        detail_top2.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
+                        render_compare_status_cards(detail_row)
                         default_entry_val = detail_row.get("模擬進場價", detail_row.get("盤前建議進場", ""))
                         try:
                             default_entry_num = float(default_entry_val)
@@ -2342,6 +2551,7 @@ with tab2:
                             sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
                             sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
                             render_sim_matrix(_entry_time, _close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret, _low, _low_result, _low_pnl, _low_ret)
+                            render_reason_block(detail_row, "這檔為何這樣判斷")
 
                             mobile_tabs = st.tabs(["對照重點", "盤前明細", "盤後明細"])
                             with mobile_tabs[0]:
@@ -2350,7 +2560,10 @@ with tab2:
                                 top_b.metric("代碼", detail_row.get("股票代碼", ""))
                                 top_c, top_d = st.columns(2)
                                 top_c.metric("快照時間", detail_row.get("盤前快照時間", ""))
-                                top_d.metric("變化判斷", detail_row.get("變化判斷", ""))
+                                top_d.metric("價格變化", detail_row.get("價格變化", ""))
+                                top_i, top_j = st.columns(2)
+                                top_i.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
+                                top_j.metric("價量結論", detail_row.get("價量結論", ""))
                                 top_e, top_f = st.columns(2)
                                 top_e.metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
                                 top_f.metric("模擬進場價", fmt_price(_entry))
@@ -2411,6 +2624,12 @@ with tab2:
                                 verify_cols[1].metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
                                 verify_cols[2].metric("停損觸發", fmt_text(sim_detail_row.get("停損觸發", "")))
                                 verify_cols[3].metric("是否可成交", fmt_text(sim_detail_row.get("是否可成交", "")))
+                                verify_cols2 = st.columns(3)
+                                verify_cols2[0].metric("價格變化", fmt_text(detail_row.get("價格變化", "")))
+                                verify_cols2[1].metric("結構變化", fmt_text(detail_row.get("結構變化", detail_row.get("變化判斷", ""))))
+                                verify_cols2[2].metric("價量結論", fmt_text(detail_row.get("價量結論", "")))
+                                if detail_row.get("價格變化", "") == "待盤後":
+                                    st.caption("目前仍在盤中或盤後更新期，因此『價格變化 / 結構變化』先標示為待盤後；但價量結論會先顯示當前盤中判讀。")
 
                             with d2:
                                 with st.container(border=True):
@@ -2424,6 +2643,9 @@ with tab2:
                                     post_cols_2[0].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
                                     post_cols_2[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
                                     post_cols_2[2].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
+                                    reason_source = detail_row.copy()
+                                    reason_source["風報比"] = detail_row.get("盤後風報比", detail_row.get("盤前風報比", ""))
+                                    render_reason_block(reason_source, "這檔為何這樣判斷")
 
                                 with st.container(border=True):
                                     st.markdown("###### 收盤模擬")
