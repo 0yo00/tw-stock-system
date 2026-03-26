@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v75")
+st.set_page_config(layout="wide", page_title="台股短線系統 v78")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v75</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v78</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v75")
+st.title("🚀 台股短線系統 v78")
 
 def inject_responsive_css():
     st.markdown("""
@@ -743,6 +743,65 @@ def render_compare_status_cards(detail_row: dict, title: str = "對照摘要"):
     c.metric("結構變化", fmt_text(detail_row.get("結構變化", detail_row.get("變化判斷", ""))) or "--")
     c.caption("綜合支撐、壓力、訊號、風報比後的結構判讀")
 
+
+def build_short_strategy(row: dict):
+    """
+    空方正式版：獨立輸出空方壓力 / 支撐 / 進場 / 停損 / 中繼目標 / 跌破目標
+    以現有結構欄位推導，不與做多欄位混寫。
+    """
+    try:
+        close = float(row.get("收盤", 0) or 0)
+        support = float(row.get("支撐", 0) or 0)
+        resistance = float(row.get("短期壓力", 0) or 0)
+        breakout = float(row.get("突破目標", 0) or 0)
+        mid = float(row.get("中繼目標", 0) or 0)
+    except Exception:
+        return {
+            "空方短期壓力": "",
+            "空方短期支撐": "",
+            "空方建議進場": "",
+            "空方停損": "",
+            "空方中繼目標": "",
+            "空方跌破目標": ""
+        }
+
+    # 空方壓力：優先用短期壓力，若過近則用收盤與壓力中間值作反彈空區
+    short_resistance = resistance if resistance > 0 else close
+    short_support = support if support > 0 else close
+
+    # 空方進場：若原本結論/評級偏空，優先靠近收盤或反彈壓力區
+    if str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空":
+        # 若收盤已接近壓力下方，直接用收盤；否則用壓力回彈區
+        if short_resistance > 0 and close > 0 and abs(short_resistance - close) / max(close, 1) <= 0.03:
+            short_entry = close
+        else:
+            short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+    else:
+        short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+
+    # 空方停損：放在空方壓力上方；若已有突破目標，取較高者
+    short_stop = max(short_resistance * 1.02, breakout if breakout > 0 else 0)
+    short_stop = round(short_stop, 2) if short_stop > 0 else ""
+
+    # 空方中繼目標：先看原支撐
+    short_mid = round(short_support, 2) if short_support > 0 else ""
+
+    # 空方跌破目標：用壓力到支撐的等幅下推
+    if short_resistance > 0 and short_support > 0:
+        width = short_resistance - short_support
+        short_break = round(max(0.0, short_support - width), 2)
+    else:
+        short_break = ""
+
+    return {
+        "空方短期壓力": round(short_resistance, 2) if short_resistance > 0 else "",
+        "空方短期支撐": round(short_support, 2) if short_support > 0 else "",
+        "空方建議進場": round(short_entry, 2) if short_entry > 0 else "",
+        "空方停損": short_stop,
+        "空方中繼目標": short_mid,
+        "空方跌破目標": short_break
+    }
+
 def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
     name_map = name_map or load_name_map()
     resolved_code, raw_df = resolve_symbol(raw_stock)
@@ -827,6 +886,10 @@ def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = Non
         "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1), "乖離率5日": round(bias5, 2),
         "成交量": int(vol), "昨量": int(vol_prev), "量比5日": vol_ratio, "量能變化": vol_trend, "量能變化%": vol_change_pct,
         "價量結論": pv_label, "價量燈號": pv_light, "價量理由": "｜".join(pv_reasons),
+        **build_short_strategy({
+            "收盤": close, "支撐": support, "短期壓力": resistance, "突破目標": final_target, "中繼目標": mid_target,
+            "操作評級": action_label, "結論": conclusion
+        }),
         "選股理由": reason,
         "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
         "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
@@ -2155,7 +2218,7 @@ with tab1:
             sort_c2.caption(f"目前排序：{sort_label}")
 
             mobile_core_cols = ["股票","結論","交易訊號","趨勢燈號","風報比"]
-            desktop_core_cols = ["股票","族群","收盤","星級","結論","交易訊號","趨勢燈號","進場燈號","量能燈號","支撐","短期壓力","風報比"]
+            desktop_core_cols = ["股票","族群","收盤","星級","結論","操作評級","交易訊號","趨勢燈號","進場燈號","量能燈號","價量燈號","支撐","短期壓力","風報比"]
             detail_cols = ["中繼目標","突破目標","排名分組","排名原因","RSI","KD_K","KD_D","乖離率5日","量能變化","量能變化%","量比5日"]
             core_cols = mobile_core_cols if st.session_state.mobile_mode else desktop_core_cols
             st.dataframe(sorted_df[core_cols], use_container_width=True, hide_index=True)
@@ -2231,17 +2294,26 @@ with tab1:
                     st.success(f"{display_name(st.session_state.selected_code, name_map)} 已收藏到我的最愛。")
 
             st.subheader(f"{reverse_map[st.session_state.selected_code]} 詳細分析")
-            metric_pairs = [
-                ("星級", row["星級"]), ("操作評級", row["操作評級"]), ("結論", row["結論"]), ("交易訊號", row["交易訊號"]),
-                ("最新收盤", f'{row["收盤"]:.2f}'), ("短期支撐", f'{row["支撐"]:.2f}'), ("短期壓力", f'{row["短期壓力"]:.2f}'), ("突破目標", f'{row["突破目標"]:.2f}'),
-                ("建議進場", f'{row["進場"]:.2f}'), ("停損", f'{row["停損"]:.2f}'), ("中繼目標", f'{row["中繼目標"]:.2f}'), ("風報比", f'{row["風報比"]:.2f}'),
-                ("KD-K", f'{row["KD_K"]:.1f}'), ("KD-D", f'{row["KD_D"]:.1f}'), ("5日乖離率", f'{row["乖離率5日"]:.2f}%'), ("量比(5日)", f'{row["量比5日"]:.2f}'),
-                ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'), ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'), ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%')
+
+            core_pairs = [
+                ("最新收盤", f'{row["收盤"]:.2f}'),
+                ("星級", row["星級"]),
+                ("結論", row["結論"]),
+                ("操作評級", row["操作評級"]),
+                ("交易訊號", row["交易訊號"]),
+                ("風報比", f'{row["風報比"]:.2f}'),
+                ("KD-K", f'{row["KD_K"]:.1f}'),
+                ("KD-D", f'{row["KD_D"]:.1f}'),
+                ("5日乖離率", f'{row["乖離率5日"]:.2f}%'),
+                ("量比(5日)", f'{row["量比5日"]:.2f}'),
+                ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'),
+                ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'),
+                ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%')
             ]
             cols_per_row = 2 if st.session_state.mobile_mode else 4
-            for i in range(0, len(metric_pairs), cols_per_row):
+            for i in range(0, len(core_pairs), cols_per_row):
                 cols = st.columns(cols_per_row)
-                for col, (label, value) in zip(cols, metric_pairs[i:i+cols_per_row]):
+                for col, (label, value) in zip(cols, core_pairs[i:i+cols_per_row]):
                     col.metric(label, value)
 
             st.markdown("#### 訊號燈號")
@@ -2249,6 +2321,38 @@ with tab1:
             pv_a, pv_b = st.columns(2)
             pv_a.metric("價量結論", row.get("價量結論", ""))
             pv_b.metric("價量燈號", row.get("價量燈號", ""))
+
+            with st.expander("做多策略", expanded=False):
+                long_pairs = [
+                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
+                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
+                    ("多方建議進場", f'{row["進場"]:.2f}'),
+                    ("多方停損", f'{row["停損"]:.2f}'),
+                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
+                    ("多方突破目標", f'{row["突破目標"]:.2f}')
+                ]
+                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(long_pairs), long_cols_per_row):
+                    cols = st.columns(long_cols_per_row)
+                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                        col.metric(label, value)
+
+            with st.expander("做空策略", expanded=False):
+                short_pairs = [
+                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
+                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
+                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
+                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
+                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
+                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+                ]
+                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(short_pairs), short_cols_per_row):
+                    cols = st.columns(short_cols_per_row)
+                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                        col.metric(label, value)
+                st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
+
             render_reason_block(row, "本檔判斷理由")
 
             with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
