@@ -10,13 +10,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v70")
+st.set_page_config(layout="wide", page_title="台股短線系統 v72")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v70</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v72</span></div>
 </div>
 """, unsafe_allow_html=True)
-st.title("🚀 台股短線系統 v70")
+st.title("🚀 台股短線系統 v72")
 
 def inject_responsive_css():
     st.markdown("""
@@ -1501,25 +1501,72 @@ def get_latest_ohlc_for_compare(symbol_code: str):
     except Exception:
         return {"close": "", "high": "", "low": ""}
 
+def get_latest_daily_bar_date(symbol_code: str):
+    """
+    取日線最後一筆日期，作為正式盤後資料是否已生成的判斷基準。
+    """
+    try:
+        df = download_symbol(symbol_code)
+        if df is None or df.empty:
+            return None
+        idx = df.index[-1]
+        dt = pd.to_datetime(idx, errors="coerce")
+        if pd.isna(dt):
+            return None
+        try:
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.tz_convert("Asia/Taipei").tz_localize(None)
+        except Exception:
+            pass
+        return dt.date()
+    except Exception:
+        return None
+
 
 def get_post_market_status(symbol_code: str = "2330.TW", snapshot_time_str: str = ""):
     """
-    盤後判定改成「以快照日期為主、以市場資料日期為輔」：
-    1) 若市場資料最後日期 > 快照日期：代表已經跨到之後交易日，這份快照一定已是正式盤後
-    2) 若市場資料最後日期 == 快照日期：再看最後一筆時間是否 >= 13:30
-    3) 若抓不到分時資料：不亂判，先回更新中
-    這樣可避免：
-    - 只看伺服器時間造成時區誤判
-    - 只看 HH:MM 卻忽略日期，導致「03-25 13:24」把 03-24 快照誤判成盤中
+    V71：
+    以「日線最後一筆日期」優先判斷是否已正式盤後。
+    只有在抓不到日線日期時，才退回分時最後一筆時間做保守判定。
     """
     snapshot_date = None
     if snapshot_time_str:
         try:
-            snapshot_date = pd.to_datetime(snapshot_time_str, errors="coerce")
-            if pd.notna(snapshot_date):
-                snapshot_date = snapshot_date.date()
+            snap_dt = pd.to_datetime(snapshot_time_str, errors="coerce")
+            if pd.notna(snap_dt):
+                snapshot_date = snap_dt.date()
         except Exception:
             snapshot_date = None
+
+    try:
+        daily_date = get_latest_daily_bar_date(symbol_code)
+    except Exception:
+        daily_date = None
+
+    if snapshot_date is not None and daily_date is not None:
+        if daily_date > snapshot_date:
+            return {
+                "stage": "正式盤後",
+                "ready": True,
+                "message": f"依日線資料日期 {daily_date} 判定：已晚於快照日期 {snapshot_date}，這份快照視為正式盤後。"
+            }
+        if daily_date == snapshot_date:
+            first = get_latest_ohlc_for_compare(symbol_code)
+            second = get_latest_ohlc_for_compare(symbol_code)
+            required = ["close", "high", "low"]
+            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
+            if complete and consistent:
+                return {
+                    "stage": "正式盤後",
+                    "ready": True,
+                    "message": f"依日線資料日期 {daily_date} 判定：當天正式收盤資料已生成，且盤後資料完成二次確認。"
+                }
+            return {
+                "stage": "更新中",
+                "ready": False,
+                "message": f"依日線資料日期 {daily_date} 判定：當天正式收盤資料已生成，但盤後資料尚未通過完整/一致檢查。"
+            }
 
     try:
         df_intra = download_intraday(symbol_code)
@@ -1527,7 +1574,7 @@ def get_post_market_status(symbol_code: str = "2330.TW", snapshot_time_str: str 
             return {
                 "stage": "更新中",
                 "ready": False,
-                "message": "抓不到可用的分時資料，暫不直接判定盤後。"
+                "message": "抓不到可用的日線/分時資料，暫不直接判定盤後。"
             }
 
         last_dt = pd.to_datetime(df_intra["Datetime"].iloc[-1], errors="coerce")
@@ -1539,63 +1586,33 @@ def get_post_market_status(symbol_code: str = "2330.TW", snapshot_time_str: str 
             }
 
         market_clock = last_dt.strftime("%m-%d %H:%M")
-        market_date = last_dt.date()
         hhmm = int(last_dt.hour) * 100 + int(last_dt.minute)
 
-        # 最關鍵修正：先看「市場資料日期」與「快照日期」
-        if snapshot_date is not None and market_date > snapshot_date:
-            first = get_latest_ohlc_for_compare(symbol_code)
-            second = get_latest_ohlc_for_compare(symbol_code)
-            required = ["close", "high", "low"]
-            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
-            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
-            if complete and consistent:
-                return {
-                    "stage": "正式盤後",
-                    "ready": True,
-                    "message": f"依行情資料時間 {market_clock} 判定：市場資料日期已晚於快照日期，這份快照視為正式盤後。"
-                }
-            return {
-                "stage": "更新中",
-                "ready": False,
-                "message": f"依行情資料時間 {market_clock} 判定：市場資料日期已晚於快照日期，但盤後資料尚未通過完整/一致檢查。"
-            }
-
-        # 若市場資料日期與快照日期相同，才看是否已過 13:30
         if hhmm < 1330:
             return {
                 "stage": "盤中",
                 "ready": False,
-                "message": f"依行情資料時間 {market_clock} 判定：尚未收盤，盤後資料尚不可用。"
+                "message": f"依分時最後時間 {market_clock} 判定：尚未收盤，盤後資料尚不可用。"
             }
 
-        try:
-            first = get_latest_ohlc_for_compare(symbol_code)
-            second = get_latest_ohlc_for_compare(symbol_code)
+        first = get_latest_ohlc_for_compare(symbol_code)
+        second = get_latest_ohlc_for_compare(symbol_code)
+        required = ["close", "high", "low"]
+        complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+        consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
 
-            required = ["close", "high", "low"]
-            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
-            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
-
-            if complete and consistent:
-                return {
-                    "stage": "正式盤後",
-                    "ready": True,
-                    "message": f"依行情資料時間 {market_clock} 判定已收盤，且盤後資料完成二次確認。"
-                }
-
+        if complete and consistent:
             return {
-                "stage": "更新中",
-                "ready": False,
-                "message": f"依行情資料時間 {market_clock} 判定已收盤，但盤後資料尚未通過完整/一致檢查。"
-            }
-        except Exception:
-            return {
-                "stage": "更新中",
-                "ready": False,
-                "message": f"依行情資料時間 {market_clock} 判定已收盤，但盤後檢查失敗，暫以更新中處理。"
+                "stage": "正式盤後",
+                "ready": True,
+                "message": f"依分時最後時間 {market_clock} 判定：已收盤，且盤後資料完成二次確認。"
             }
 
+        return {
+            "stage": "更新中",
+            "ready": False,
+            "message": f"依分時最後時間 {market_clock} 判定：已收盤，但盤後資料尚未通過完整/一致檢查。"
+        }
     except Exception as e:
         return {
             "stage": "更新中",
