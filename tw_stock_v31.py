@@ -18,10 +18,10 @@ from plotly.subplots import make_subplots
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(layout="wide", page_title="台股短線系統 v119")
+st.set_page_config(layout="wide", page_title="台股短線系統 v129")
 st.markdown("""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>v119</span></div>
+  <div class="app-sticky-title">🚀 台股短線系統 <span>v129</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -270,6 +270,104 @@ def inject_responsive_css():
         background: rgba(96,165,250,0.12);
         border: 1px solid rgba(96,165,250,0.18);
         color: #bfdbfe;
+    }
+    .section-divider-card {
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(2, 6, 23, 0.58);
+        border-radius: 18px;
+        padding: 0.9rem 1rem;
+        margin: 0.35rem 0 0.9rem 0;
+    }
+    .section-divider-title {
+        font-size: 1rem;
+        font-weight: 800;
+        color: #f8fafc;
+        margin-bottom: 0.28rem;
+    }
+    .section-divider-note {
+        font-size: 0.84rem;
+        color: #cbd5e1;
+        line-height: 1.7;
+    }
+    .mini-batch-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin: 0.2rem 0 0.55rem 0;
+    }
+    .mini-batch-card {
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 16px;
+        padding: 0.85rem 0.95rem;
+        min-height: 92px;
+    }
+    .mini-batch-label {
+        color: #93c5fd;
+        font-size: 0.76rem;
+        margin-bottom: 0.35rem;
+        letter-spacing: .03em;
+        font-weight: 700;
+    }
+    .mini-batch-value {
+        color: #f8fafc;
+        font-size: 1.18rem;
+        font-weight: 800;
+        line-height: 1.25;
+        word-break: break-word;
+    }
+    .mini-batch-sub {
+        color: #cbd5e1;
+        font-size: 0.8rem;
+        margin-top: 0.35rem;
+        line-height: 1.55;
+    }
+    .diff-top-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin: 0.35rem 0 0.85rem 0;
+    }
+    .diff-top-card {
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(15, 23, 42, 0.72);
+        border-radius: 16px;
+        padding: 0.85rem 0.95rem;
+        min-height: 118px;
+    }
+    .diff-top-rank {
+        color: #93c5fd;
+        font-size: 0.75rem;
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+    }
+    .diff-top-title {
+        color: #f8fafc;
+        font-size: 1rem;
+        font-weight: 800;
+        line-height: 1.3;
+    }
+    .diff-top-main {
+        color: #bfdbfe;
+        font-size: 1.35rem;
+        font-weight: 800;
+        margin-top: 0.3rem;
+    }
+    .diff-top-sub {
+        color: #cbd5e1;
+        font-size: 0.8rem;
+        margin-top: 0.35rem;
+        line-height: 1.55;
+    }
+    .compact-toolbar-note {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-top: 0.35rem;
+    }
+    @media (max-width: 900px) {
+        .mini-batch-grid, .diff-top-grid {
+            grid-template-columns: 1fr;
+        }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1615,6 +1713,93 @@ def decision_star_and_action(score: int, breakout_status: str, breakout_strength
     if adj >= 40: return "★★☆☆☆", "避開"
     return "★☆☆☆☆", "空方"
 
+def build_operation_rating_breakdown(df: pd.DataFrame, row: dict, market_info: dict | None = None):
+    market_info = market_info or {}
+    close = float(df["Close"].iloc[-1]) if not df.empty else float(row.get("收盤", 0) or 0)
+    prev5 = float(df["Close"].iloc[-5]) if len(df) >= 5 else close
+    prev10 = float(df["Close"].iloc[-10]) if len(df) >= 10 else close
+    ma5 = float(df["ma5"].iloc[-1]) if ("ma5" in df.columns and pd.notna(df["ma5"].iloc[-1])) else close
+    ma20 = float(df["ma20"].iloc[-1]) if ("ma20" in df.columns and pd.notna(df["ma20"].iloc[-1])) else close
+    vol = float(df["Volume"].iloc[-1]) if ("Volume" in df.columns and not df.empty) else 0
+    vol5 = float(df["vol5"].iloc[-1]) if ("vol5" in df.columns and pd.notna(df["vol5"].iloc[-1])) else vol
+    rsi = float(df["rsi"].iloc[-1]) if ("rsi" in df.columns and pd.notna(df["rsi"].iloc[-1])) else 50
+    k = float(df["k"].iloc[-1]) if ("k" in df.columns and pd.notna(df["k"].iloc[-1])) else 50
+    d = float(df["d"].iloc[-1]) if ("d" in df.columns and pd.notna(df["d"].iloc[-1])) else 50
+
+    base_items = []
+    def add_item(name, score, condition, note):
+        base_items.append({"項目": name, "加減分": score if condition else 0, "判斷": note if condition else f"未達：{note}"})
+
+    add_item("站上月線", 18, close > ma20, f"收盤 {close:.2f} {'>' if close > ma20 else '<='} MA20 {ma20:.2f}")
+    add_item("站上5日線", 10, close > ma5, f"收盤 {close:.2f} {'>' if close > ma5 else '<='} MA5 {ma5:.2f}")
+    add_item("高於5日前", 10, close > prev5, f"收盤 {close:.2f} {'>' if close > prev5 else '<='} 5日前 {prev5:.2f}")
+    add_item("高於10日前", 6, close > prev10, f"收盤 {close:.2f} {'>' if close > prev10 else '<='} 10日前 {prev10:.2f}")
+    add_item("量能大於5日均量", 14, vol > vol5, f"成交量 {vol:,.0f} {'>' if vol > vol5 else '<='} 均量 {vol5:,.0f}")
+    add_item("RSI健康區", 8, 45 <= rsi <= 75, f"RSI {rsi:.1f} 落在 45~75")
+    add_item("KD偏多", 5, k > d, f"K {k:.1f} {'>' if k > d else '<='} D {d:.1f}")
+
+    base_score = int(sum(item["加減分"] for item in base_items))
+    market_adj = int(market_info.get("score_adj", 0) or 0)
+    market_label = str(market_info.get("label", "中性"))
+
+    extra_items = []
+    breakout_status = str(row.get("突破狀態", ""))
+    breakout_strength = str(row.get("突破強度", ""))
+    rr = float(row.get("風報比", 0) or 0)
+    bias = str(row.get("盤前建議", row.get("盤前建議", "")) or "")
+
+    if market_adj != 0:
+        extra_items.append({"項目": "大盤加權", "加減分": market_adj, "判斷": f"大盤濾網：{market_label}"})
+    else:
+        extra_items.append({"項目": "大盤加權", "加減分": 0, "判斷": f"大盤濾網：{market_label}"})
+
+    if breakout_status == "已突破":
+        extra_items.append({"項目": "突破狀態", "加減分": 12, "判斷": "已突破"})
+    elif breakout_status == "假突破風險":
+        extra_items.append({"項目": "突破狀態", "加減分": -18, "判斷": "假突破風險"})
+    else:
+        extra_items.append({"項目": "突破狀態", "加減分": -4, "判斷": breakout_status or "尚未突破"})
+
+    if breakout_strength == "強":
+        extra_items.append({"項目": "突破強度", "加減分": 6, "判斷": breakout_strength})
+    elif breakout_strength == "弱":
+        extra_items.append({"項目": "突破強度", "加減分": -6, "判斷": breakout_strength})
+    else:
+        extra_items.append({"項目": "突破強度", "加減分": 0, "判斷": breakout_strength or "普通"})
+
+    if rr >= 2.0:
+        rr_score = 8
+    elif rr >= 1.5:
+        rr_score = 4
+    elif rr < 1.0:
+        rr_score = -8
+    else:
+        rr_score = 0
+    extra_items.append({"項目": "風報比", "加減分": rr_score, "判斷": f"風報比 {rr:.2f}"})
+
+    if bias == "偏多（可進場）":
+        bias_score = 5
+    elif bias == "偏空（觀望）":
+        bias_score = -8
+    else:
+        bias_score = 0
+    extra_items.append({"項目": "盤前偏向", "加減分": bias_score, "判斷": bias or "中性（等待確認）"})
+
+    raw_total = base_score + market_adj + sum(x["加減分"] for x in extra_items[1:])
+    final_score = max(0, min(100, raw_total))
+    star, action = decision_star_and_action(base_score + market_adj, breakout_status, breakout_strength, rr, bias)
+
+    return {
+        "base_items": base_items,
+        "extra_items": extra_items,
+        "base_score": base_score,
+        "market_adj": market_adj,
+        "raw_total": raw_total,
+        "final_score": final_score,
+        "star": star,
+        "action": action,
+    }
+
 
 def trend_conclusion(action_label: str, breakout_status: str, bias: str):
     if action_label == "可以考慮進場": return "看多"
@@ -1773,6 +1958,241 @@ def compare_price_change(pre_close, post_close):
         return "持平"
     except Exception:
         return "資料不足"
+
+
+def build_pre_post_compare_table(pre_row: dict, post_row: dict) -> pd.DataFrame:
+    compare_fields = [
+        ("收盤", True), ("進場", True), ("停損", True), ("短期壓力", True),
+        ("中繼目標", True), ("突破目標", True), ("風報比", True),
+        ("結論", False), ("交易訊號", False), ("趨勢燈號", False),
+        ("進場燈號", False), ("量能燈號", False),
+    ]
+    compare_rows = []
+    for field, numeric in compare_fields:
+        pre_val = pre_row.get(field, "")
+        post_val = post_row.get(field, "")
+        changed = str(pre_val) != str(post_val)
+        if numeric:
+            try:
+                pre_num = float(pre_val)
+                post_num = float(post_val)
+                diff = round(post_num - pre_num, 2)
+                diff_text = f"+{diff}" if diff > 0 else str(diff)
+            except Exception:
+                diff_text = "—"
+        else:
+            diff_text = "有變化" if changed else "不變"
+        compare_rows.append({
+            "欄位": field,
+            "盤前": pre_val,
+            "盤後": post_val,
+            "差異": diff_text,
+            "是否變化": "是" if changed else "否"
+        })
+    return pd.DataFrame(compare_rows)
+
+
+def build_pair_structure_label(pre_row: dict, post_row: dict) -> str:
+    score = 0
+    con_rank = {"看多": 4, "中性偏多": 3, "中性": 2, "中性偏空": 1, "看空": 0}
+    sig_rank = {"🔥進場": 4, "👀觀察": 3, "⏳等待": 2, "❌不進": 0}
+    try:
+        score += 1 if con_rank.get(str(post_row.get("結論", "")), 1) > con_rank.get(str(pre_row.get("結論", "")), 1) else 0
+        score -= 1 if con_rank.get(str(post_row.get("結論", "")), 1) < con_rank.get(str(pre_row.get("結論", "")), 1) else 0
+        score += 1 if sig_rank.get(str(post_row.get("交易訊號", "")), 1) > sig_rank.get(str(pre_row.get("交易訊號", "")), 1) else 0
+        score -= 1 if sig_rank.get(str(post_row.get("交易訊號", "")), 1) < sig_rank.get(str(pre_row.get("交易訊號", "")), 1) else 0
+    except Exception:
+        pass
+    try:
+        pre_rr = float(pre_row.get("風報比", 0) or 0)
+        post_rr = float(post_row.get("風報比", 0) or 0)
+        if post_rr - pre_rr > 0.15:
+            score += 1
+        elif post_rr - pre_rr < -0.15:
+            score -= 1
+    except Exception:
+        pass
+    if score >= 1:
+        return "變強"
+    if score <= -1:
+        return "變弱"
+    return "持平"
+
+
+def build_batch_field_diff_summary(compare_batch_df: pd.DataFrame) -> pd.DataFrame:
+    if compare_batch_df is None or compare_batch_df.empty:
+        return pd.DataFrame()
+
+    field_pairs = [
+        ("收盤", "盤前收盤", "盤後收盤"),
+        ("風報比", "盤前風報比", "盤後風報比"),
+        ("結論", "盤前結論", "盤後結論"),
+        ("訊號", "盤前訊號", "盤後訊號"),
+        ("價格變化", "價格變化", "價格變化"),
+        ("結構變化", "結構變化", "結構變化"),
+        ("支撐驗證", "支撐驗證", "支撐驗證"),
+        ("壓力驗證", "壓力驗證", "壓力驗證"),
+        ("停損觸發", "停損觸發", "停損觸發"),
+    ]
+
+    rows = []
+    total = len(compare_batch_df)
+    for label, pre_col, post_col in field_pairs:
+        if pre_col not in compare_batch_df.columns or post_col not in compare_batch_df.columns:
+            continue
+        if pre_col == post_col:
+            series = compare_batch_df[pre_col].astype(str).fillna("").str.strip()
+            changed_count = int((series != "") .sum())
+            sample_text = "、".join(list(dict.fromkeys([x for x in series.tolist() if x]))[:3])
+            rows.append({
+                "欄位": label,
+                "變動檔數": changed_count,
+                "變動比例%": round(changed_count / total * 100, 1) if total else 0.0,
+                "重點預覽": sample_text or "—"
+            })
+            continue
+
+        pre_series = compare_batch_df[pre_col].astype(str).fillna("").str.strip()
+        post_series = compare_batch_df[post_col].astype(str).fillna("").str.strip()
+        coverage_mask = (pre_series != "") | (post_series != "")
+        changed_mask = coverage_mask & (pre_series != post_series)
+        changed_count = int(changed_mask.sum())
+        preview_df = compare_batch_df.loc[changed_mask, ["股票", pre_col, post_col]].head(3) if "股票" in compare_batch_df.columns else pd.DataFrame()
+        preview_items = []
+        if not preview_df.empty:
+            for _, r in preview_df.iterrows():
+                preview_items.append(f"{r.get('股票','')}：{r.get(pre_col,'')}→{r.get(post_col,'')}")
+        rows.append({
+            "欄位": label,
+            "變動檔數": changed_count,
+            "變動比例%": round(changed_count / max(int(coverage_mask.sum()), 1) * 100, 1),
+            "重點預覽": "；".join(preview_items) if preview_items else "—"
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return result.sort_values(["變動檔數", "欄位"], ascending=[False, True]).reset_index(drop=True)
+
+
+CANONICAL_FLOW_COLUMNS = ["收盤", "進場", "停損", "短期壓力", "中繼目標", "突破目標", "風報比", "結論", "交易訊號"]
+
+
+def get_analysis_core_columns(mobile: bool = False):
+    ordered = ["股票", "族群", *CANONICAL_FLOW_COLUMNS, "TWSE命中", "TWSE收盤", "星級", "操作評級", "趨勢燈號", "進場燈號", "量能燈號", "價量燈號"]
+    if mobile:
+        return ["股票", "收盤", "進場", "停損", "風報比", "結論", "交易訊號"]
+    return ordered
+
+
+def render_info_card_grid(cards):
+    if not cards:
+        return
+    items = []
+    for item in cards:
+        label = html_escape(item.get("label", ""))
+        value = html_escape(item.get("value", "--"))
+        sub = html_escape(item.get("sub", ""))
+        items.append(f'<div class="mini-batch-card"><div class="mini-batch-label">{label}</div><div class="mini-batch-value">{value}</div>' + (f'<div class="mini-batch-sub">{sub}</div>' if sub else '') + '</div>')
+    st.markdown('<div class="mini-batch-grid">' + ''.join(items) + '</div>', unsafe_allow_html=True)
+
+
+def render_field_highlight_cards(field_summary: pd.DataFrame, top_n: int = 3):
+    if field_summary is None or field_summary.empty:
+        st.caption("目前沒有可顯示的差異摘要。")
+        return
+    cards = []
+    for idx, (_, row) in enumerate(field_summary.head(top_n).iterrows(), start=1):
+        cards.append(
+            f'<div class="diff-top-card">'
+            f'<div class="diff-top-rank">TOP {idx}</div>'
+            f'<div class="diff-top-title">{html_escape(row.get("欄位", "--"))}</div>'
+            f'<div class="diff-top-main">{int(row.get("變動檔數", 0))} 檔</div>'
+            f'<div class="diff-top-sub">變動比例 {html_escape(str(row.get("變動比例%", 0)))}%<br>{html_escape(str(row.get("重點預覽", "—"))[:120])}</div>'
+            f'</div>'
+        )
+    st.markdown('<div class="diff-top-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+
+
+def render_section_divider(title: str, note: str = ""):
+    st.markdown(
+        f'<div class="section-divider-card"><div class="section-divider-title">{html_escape(title)}</div>'
+        + (f'<div class="section-divider-note">{html_escape(note)}</div>' if note else '')
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_batch_compare_detail(detail_row: dict, key_prefix: str = "batch_detail"):
+
+    if not detail_row:
+        st.caption("目前沒有可顯示的單股細節。")
+        return
+
+    render_compare_status_cards(detail_row)
+    render_compare_chips(detail_row)
+    render_compare_matrix(detail_row)
+
+    detail_code = str(detail_row.get("股票代碼", "")).strip() or str(detail_row.get("股票", "")).split("（")[0].strip()
+    default_entry_val = detail_row.get("模擬進場價", detail_row.get("盤前建議進場", ""))
+    try:
+        default_entry_num = float(default_entry_val)
+    except Exception:
+        default_entry_num = 0.0
+
+    custom_entry_price = st.number_input(
+        "自訂模擬進場價",
+        min_value=0.0,
+        value=round(float(default_entry_num), 2),
+        step=0.1,
+        format="%.2f",
+        key=f"custom_entry_{key_prefix}_{detail_code}"
+    )
+    sim_data = simulate_entry_from_intraday(detail_code, float(custom_entry_price), detail_row.get("盤前停損", ""))
+    render_sim_matrix(
+        sim_data.get("進場時間", "--"),
+        sim_data.get("模擬收盤價", ""),
+        sim_data.get("收盤模擬結果", "資料不足"),
+        sim_data.get("收盤模擬損益", ""),
+        sim_data.get("收盤模擬報酬率%", ""),
+        sim_data.get("模擬最高價", ""),
+        sim_data.get("最高模擬結果", "資料不足"),
+        sim_data.get("最高模擬損益", ""),
+        sim_data.get("最高模擬報酬率%", ""),
+        sim_data.get("模擬最低價", ""),
+        sim_data.get("最低模擬結果", "資料不足"),
+        sim_data.get("最低模擬損益", ""),
+        sim_data.get("最低模擬報酬率%", ""),
+    )
+
+    left_detail, right_detail = st.columns(2)
+    with left_detail:
+        st.markdown("#### 盤前資料")
+        pre_a, pre_b, pre_c = st.columns(3)
+        pre_a.metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
+        pre_b.metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
+        pre_c.metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
+        pre_d, pre_e, pre_f = st.columns(3)
+        pre_d.metric("建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
+        pre_e.metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
+        pre_f.metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
+        pre_g, pre_h = st.columns(2)
+        pre_g.metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
+        pre_h.metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
+
+    with right_detail:
+        st.markdown("#### 盤後資料")
+        post_a, post_b, post_c = st.columns(3)
+        post_a.metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
+        post_b.metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
+        post_c.metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
+        post_d, post_e, post_f = st.columns(3)
+        post_d.metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
+        post_e.metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
+        post_f.metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
+        reason_source = detail_row.copy()
+        reason_source["風報比"] = detail_row.get("盤後風報比", detail_row.get("盤前風報比", ""))
+        render_reason_block(reason_source, "這檔為何這樣判斷")
 
 def render_compare_status_cards(detail_row: dict, title: str = "對照摘要"):
     a, b, c = st.columns(3)
@@ -2914,15 +3334,15 @@ def render_global_banner():
     st.markdown(
         f"""
         <div class="main-shell" style="padding:1.05rem 1.15rem 0.85rem 1.15rem; margin-bottom:1rem;">
-          <div style="font-size:1.65rem;font-weight:900;color:#f8fafc;line-height:1.2;">🚀 台股短線系統 V119</div>
-          <div style="font-size:0.95rem;color:#cbd5e1;margin-top:0.4rem;">目前頁面：{st.session_state.current_page}　｜　V119：修正持倉中心帶入分析中心個股的 session_state 問題，並延續實戰文案版。</div>
+          <div style="font-size:1.65rem;font-weight:900;color:#f8fafc;line-height:1.2;">🚀 台股短線系統 V129</div>
+          <div style="font-size:0.95rem;color:#cbd5e1;margin-top:0.4rem;">目前頁面：{st.session_state.current_page}　｜　V129：全站欄位一致化＋版面收尾版，延續快照中心正式版整理，開始統一分析中心、快照中心與持倉中心的核心閱讀順序。</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 with st.sidebar:
-    st.markdown('<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">V119 持倉中心帶入修正版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">以 V118 為基底，修正持倉中心「帶入分析中心目前個股」會卡住的問題，並保留實戰文案版。</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">V129 全站一致化版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源，這版開始統一核心欄位順序、收尾快照中心版面，讓分析中心 / 快照中心 / 持倉中心更像同一套系統。</div></div>', unsafe_allow_html=True)
     page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -2987,7 +3407,7 @@ with st.sidebar:
             st.caption("目前沒有可刪除的其他使用者。")
 
     st.caption(f"目前資料分流：{st.session_state.current_user}")
-    st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。V129 開始把核心欄位順序、卡片樣式與主要閱讀動線統一起來。</div></div>', unsafe_allow_html=True)
     st.header("⭐ 我的最愛")
     favs = st.session_state.favorites
     if favs:
@@ -3822,7 +4242,7 @@ def build_position_plan(row: dict, entry_price: float, side: str = "做多", sha
 render_global_banner()
 
 if st.session_state.current_page == "分析中心":
-    st.markdown('<div class="main-shell"><h3>📈 分析中心</h3><p>正式版分析工作區：集中處理個股搜尋、自動挑股、補資料命中與單股判讀，閱讀順序更清楚。</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-shell"><h3>📈 分析中心</h3><p>正式版分析工作區：集中處理個股搜尋、自動挑股、補資料命中與單股判讀，這版開始同步全站核心欄位順序。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
     jump_c1, jump_c2 = st.columns([1.2, 4])
     if jump_c1.button("前往市場儀表板", use_container_width=True):
@@ -4095,10 +4515,8 @@ if st.session_state.current_page == "分析中心":
             sorted_df = filtered_df.sort_values(sort_col, ascending=asc).copy()
             sort_c2.caption(f"目前排序：{sort_label}")
 
-            mobile_core_cols = ["股票","結論","交易訊號","TWSE命中","風報比"]
-            desktop_core_cols = ["股票","族群","收盤","TWSE收盤","TWSE命中","星級","結論","操作評級","交易訊號","趨勢燈號","進場燈號","量能燈號","價量燈號","支撐","短期壓力","風報比"]
-            detail_cols = ["中繼目標","突破目標","排名分組","排名原因","RSI","KD_K","KD_D","KDJ_J","MACD_DIF","MACD_DEA","MACD_BAR","乖離率5日","量能變化","量能變化%","量比5日","TWSE日期","TWSE名稱","TWSE成交量","TWSE成交值","TWSE漲跌價差","TWSE成交筆數","TWSE收盤差異"]
-            core_cols = mobile_core_cols if st.session_state.mobile_mode else desktop_core_cols
+            core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
+            detail_cols = ["支撐","排名分組","排名原因","RSI","KD_K","KD_D","KDJ_J","MACD_DIF","MACD_DEA","MACD_BAR","乖離率5日","量能變化","量能變化%","量比5日","TWSE日期","TWSE名稱","TWSE成交量","TWSE成交值","TWSE漲跌價差","TWSE成交筆數","TWSE收盤差異"]
             sorted_df = ensure_dataframe_columns(sorted_df, list(dict.fromkeys(core_cols + detail_cols)))
             st.dataframe(sorted_df[core_cols], use_container_width=True, hide_index=True)
 
@@ -4173,81 +4591,180 @@ if st.session_state.current_page == "分析中心":
                     st.success(f"{display_name(st.session_state.selected_code, name_map)} 已收藏到我的最愛。")
 
             st.subheader(f"{reverse_map[st.session_state.selected_code]} 詳細分析")
-            st.caption("正式版閱讀順序：先看核心結論，再看技術/量能，再看訊號燈號與官方最新日資料。")
+            st.caption("正式版閱讀順序：先看決策摘要，再看技術細節，最後看官方最新日資料。")
 
-            st.markdown("#### 核心摘要")
-            core_top = [
-                ("最新收盤", f'{row["收盤"]:.2f}'),
-                ("結論", row["結論"]),
-                ("交易訊號", row["交易訊號"]),
-                ("風報比", f'{row["風報比"]:.2f}'),
-            ]
-            top_cols = st.columns(2 if st.session_state.mobile_mode else 4)
-            for col, (label, value) in zip(top_cols, core_top):
-                col.metric(label, value)
+            tab_decision, tab_tech, tab_official = st.tabs(["決策摘要", "技術細節", "官方資料"])
 
-            st.markdown("#### 位置與策略")
-            strategy_pairs = [
-                ("短期支撐", f'{row["支撐"]:.2f}'),
-                ("短期壓力", f'{row["短期壓力"]:.2f}'),
-                ("建議進場", f'{row["進場"]:.2f}'),
-                ("停損", f'{row["停損"]:.2f}'),
-                ("目標", f'{row["目標"]:.2f}'),
-                ("突破狀態", f'{row.get("突破狀態", "--")} / {row.get("突破強度", "--")}'),
-            ]
-            strategy_cols_per_row = 2 if st.session_state.mobile_mode else 3
-            for i in range(0, len(strategy_pairs), strategy_cols_per_row):
-                cols = st.columns(strategy_cols_per_row)
-                for col, (label, value) in zip(cols, strategy_pairs[i:i+strategy_cols_per_row]):
-                    col.metric(label, value)
-            st.caption(f'追價建議：{row.get("追價建議", "--")}｜排名分組：{row.get("排名分組", "--")}')
-
-            if st.session_state.mobile_mode:
-                lower_left = st.container()
-                lower_right = st.container()
-            else:
-                lower_left, lower_right = st.columns(2)
-            with lower_left:
-                st.markdown("#### 技術節奏")
-                tech_pairs = [
-                    ("星級", row["星級"]),
-                    ("操作評級", row["操作評級"]),
-                    ("KD-K", f'{row["KD_K"]:.1f}'),
-                    ("KD-D", f'{row["KD_D"]:.1f}'),
-                    ("KDJ-J", f'{_safe_float(row.get("KDJ_J")):.1f}' if _safe_float(row.get("KDJ_J")) is not None else "--"),
-                    ("5日乖離率", f'{row["乖離率5日"]:.2f}%'),
-                    ("MACD DIF", f'{_safe_float(row.get("MACD_DIF")):.2f}' if _safe_float(row.get("MACD_DIF")) is not None else "--"),
-                    ("MACD DEA", f'{_safe_float(row.get("MACD_DEA")):.2f}' if _safe_float(row.get("MACD_DEA")) is not None else "--"),
-                    ("MACD柱體", f'{_safe_float(row.get("MACD_BAR")):.2f}' if _safe_float(row.get("MACD_BAR")) is not None else "--"),
+            with tab_decision:
+                st.markdown("#### 核心摘要")
+                core_top = [
+                    ("收盤", f'{row["收盤"]:.2f}'),
+                    ("進場", f'{row["進場"]:.2f}'),
+                    ("停損", f'{row["停損"]:.2f}'),
+                    ("短期壓力", f'{row["短期壓力"]:.2f}'),
+                    ("中繼目標", f'{row["中繼目標"]:.2f}'),
+                    ("突破目標", f'{row["突破目標"]:.2f}'),
+                    ("風報比", f'{row["風報比"]:.2f}'),
+                    ("結論", row["結論"]),
+                    ("交易訊號", row["交易訊號"]),
                 ]
-                tech_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(tech_pairs), tech_cols_per_row):
-                    cols = st.columns(tech_cols_per_row)
-                    for col, (label, value) in zip(cols, tech_pairs[i:i+tech_cols_per_row]):
-                        col.metric(label, value)
-                st.caption(f"KDJ判讀：{kdj_signal(row)}｜MACD判讀：{macd_signal(row)}")
-
-                st.markdown("#### 訊號燈號")
-                render_signal_lights(row)
-
-            with lower_right:
-                st.markdown("#### 量能觀察")
-                volume_pairs = [
-                    ("量比(5日)", f'{row["量比5日"]:.2f}'),
-                    ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'),
-                    ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'),
-                    ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%'),
-                    ("價量結論", row.get("價量結論", "")),
-                    ("價量燈號", row.get("價量燈號", "")),
-                ]
-                vol_cols_per_row = 2 if st.session_state.mobile_mode else 2
-                for i in range(0, len(volume_pairs), vol_cols_per_row):
-                    cols = st.columns(vol_cols_per_row)
-                    for col, (label, value) in zip(cols, volume_pairs[i:i+vol_cols_per_row]):
+                top_cols = st.columns(2 if st.session_state.mobile_mode else 3)
+                for i in range(0, len(core_top), len(top_cols)):
+                    cols = st.columns(2 if st.session_state.mobile_mode else 3)
+                    for col, (label, value) in zip(cols, core_top[i:i + (2 if st.session_state.mobile_mode else 3)]):
                         col.metric(label, value)
 
+                st.markdown("#### 操作評級拆解")
+                breakdown = build_operation_rating_breakdown(df_chart, row.to_dict() if hasattr(row, "to_dict") else dict(row), market_info)
+                if st.session_state.mobile_mode:
+                    bd_row1 = st.columns(2)
+                    bd_row1[0].metric("基本分", str(breakdown["base_score"]))
+                    bd_row1[1].metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
+                    bd_row2 = st.columns(2)
+                    bd_row2[0].metric("最終評分", str(breakdown["final_score"]))
+                    bd_row2[1].metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+                else:
+                    bd1, bd2, bd3, bd4 = st.columns(4)
+                    bd1.metric("基本分", str(breakdown["base_score"]))
+                    bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
+                    bd3.metric("最終評分", str(breakdown["final_score"]))
+                    bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+                score_df = pd.DataFrame(breakdown["base_items"] + breakdown["extra_items"])
+                with st.expander("展開評分加減明細", expanded=False):
+                    st.dataframe(score_df, use_container_width=True, hide_index=True)
+                    st.caption("評級順序：先算基本分，再加上大盤加權，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
+
+                st.markdown("#### 位置與策略")
+                strategy_pairs = [
+                    ("短期支撐", f'{row["支撐"]:.2f}'),
+                    ("短期壓力", f'{row["短期壓力"]:.2f}'),
+                    ("建議進場", f'{row["進場"]:.2f}'),
+                    ("停損", f'{row["停損"]:.2f}'),
+                    ("目標", f'{row["目標"]:.2f}'),
+                    ("突破狀態", f'{row.get("突破狀態", "--")} / {row.get("突破強度", "--")}'),
+                ]
+                strategy_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(strategy_pairs), strategy_cols_per_row):
+                    cols = st.columns(strategy_cols_per_row)
+                    for col, (label, value) in zip(cols, strategy_pairs[i:i+strategy_cols_per_row]):
+                        col.metric(label, value)
+                st.caption(f'追價建議：{row.get("追價建議", "--")}｜排名分組：{row.get("排名分組", "--")}')
+
+                with st.expander("做多策略", expanded=False):
+                    long_pairs = [
+                        ("多方短期支撐", f'{row["支撐"]:.2f}'),
+                        ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
+                        ("多方建議進場", f'{row["進場"]:.2f}'),
+                        ("多方停損", f'{row["停損"]:.2f}'),
+                        ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
+                        ("多方突破目標", f'{row["突破目標"]:.2f}')
+                    ]
+                    long_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                    for i in range(0, len(long_pairs), long_cols_per_row):
+                        cols = st.columns(long_cols_per_row)
+                        for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                            col.metric(label, value)
+
+                with st.expander("做空策略", expanded=False):
+                    short_pairs = [
+                        ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
+                        ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
+                        ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
+                        ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
+                        ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
+                        ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+                    ]
+                    short_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                    for i in range(0, len(short_pairs), short_cols_per_row):
+                        cols = st.columns(short_cols_per_row)
+                        for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                            col.metric(label, value)
+                    st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
+
+                render_reason_block(row, "本檔判斷理由")
+
+                st.markdown("#### 摘要重點")
+                st.info(row["摘要1"])
+                st.info(row["摘要2"])
+                st.info(row["摘要3"])
+                if row["交易訊號"] == "🔥進場":
+                    st.success(f"操作建議：可列入優先觀察，重點看 {row['短期壓力']:.2f} 是否有效站上。")
+                elif row["交易訊號"] == "⏳等待":
+                    st.warning(f"操作建議：先等突破或回測確認，不建議在 {row['收盤']:.2f} 直接追價。")
+                elif row["交易訊號"] == "❌不進":
+                    st.error("操作建議：目前偏保守，先不進場，等待結構或燈號改善。")
+                else:
+                    st.info("操作建議：可持續觀察量價與燈號變化，再決定是否列入候選。")
+
+            with tab_tech:
+                tech_left, tech_right = (st.columns(2) if not st.session_state.mobile_mode else [st.container(), st.container()])
+                with tech_left:
+                    st.markdown("#### 技術節奏")
+                    tech_pairs = [
+                        ("星級", row["星級"]),
+                        ("操作評級", row["操作評級"]),
+                        ("KD-K", f'{row["KD_K"]:.1f}'),
+                        ("KD-D", f'{row["KD_D"]:.1f}'),
+                        ("KDJ-J", f'{_safe_float(row.get("KDJ_J")):.1f}' if _safe_float(row.get("KDJ_J")) is not None else "--"),
+                        ("5日乖離率", f'{row["乖離率5日"]:.2f}%'),
+                        ("MACD DIF", f'{_safe_float(row.get("MACD_DIF")):.2f}' if _safe_float(row.get("MACD_DIF")) is not None else "--"),
+                        ("MACD DEA", f'{_safe_float(row.get("MACD_DEA")):.2f}' if _safe_float(row.get("MACD_DEA")) is not None else "--"),
+                        ("MACD柱體", f'{_safe_float(row.get("MACD_BAR")):.2f}' if _safe_float(row.get("MACD_BAR")) is not None else "--"),
+                    ]
+                    tech_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                    for i in range(0, len(tech_pairs), tech_cols_per_row):
+                        cols = st.columns(tech_cols_per_row)
+                        for col, (label, value) in zip(cols, tech_pairs[i:i+tech_cols_per_row]):
+                            col.metric(label, value)
+                    st.caption(f"KDJ判讀：{kdj_signal(row)}｜MACD判讀：{macd_signal(row)}")
+                    st.markdown("#### 訊號燈號")
+                    render_signal_lights(row)
+
+                with tech_right:
+                    st.markdown("#### 量能觀察")
+                    volume_pairs = [
+                        ("量比(5日)", f'{row["量比5日"]:.2f}'),
+                        ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'),
+                        ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'),
+                        ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%'),
+                        ("價量結論", row.get("價量結論", "")),
+                        ("價量燈號", row.get("價量燈號", "")),
+                    ]
+                    vol_cols_per_row = 2
+                    for i in range(0, len(volume_pairs), vol_cols_per_row):
+                        cols = st.columns(vol_cols_per_row)
+                        for col, (label, value) in zip(cols, volume_pairs[i:i+vol_cols_per_row]):
+                            col.metric(label, value)
+
+                with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
+                    chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
+                    if chart_mode == "日K圖":
+                        st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
+                    else:
+                        intra_df = download_intraday(st.session_state.selected_code)
+                        st.plotly_chart(make_intraday_figure(intra_df, row), use_container_width=True)
+
+                with st.expander("短線重點資訊 / 最近標題", expanded=False):
+                    news_items = get_stock_news(st.session_state.selected_code)
+                    summary_bullets = summarize_event_signals(row, news_items)
+                    for b in summary_bullets:
+                        st.info(b)
+                    if news_items:
+                        for item in news_items[:2]:
+                            title = item.get("title", "")
+                            meta = "｜".join([x for x in [item.get("publisher", ""), item.get("time", "")] if x])
+                            if item.get("link"):
+                                st.markdown(f"- [{title}]({item['link']})")
+                            else:
+                                st.write(f"- {title}")
+                            if meta:
+                                st.caption(meta)
+                    else:
+                        st.caption("目前抓不到新聞資料，因此改以技術面與量價重點為主。")
+
+            with tab_official:
                 with st.container(border=True):
-                    st.markdown("##### 官方最新日資料")
+                    st.markdown("#### 官方最新日資料")
                     if str(row.get("TWSE命中", "")) == "是":
                         st.caption("收盤/收盤差異＝元；成交量＝張；成交值＝億元；成交筆數＝筆。缺值顯示為 --。")
                         ta, tb, tc = st.columns(3)
@@ -4262,84 +4779,22 @@ if st.session_state.current_page == "分析中心":
                     else:
                         st.info("這檔股票目前沒有命中官方日資料補資料。")
 
-            with st.expander("做多策略", expanded=False):
-                long_pairs = [
-                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
-                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
-                    ("多方建議進場", f'{row["進場"]:.2f}'),
-                    ("多方停損", f'{row["停損"]:.2f}'),
-                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
-                    ("多方突破目標", f'{row["突破目標"]:.2f}')
-                ]
-                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(long_pairs), long_cols_per_row):
-                    cols = st.columns(long_cols_per_row)
-                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                    extra_pairs = [
+                        ("排名分組", row.get("排名分組", "--")),
+                        ("排名原因", row.get("排名原因", "--")),
+                        ("選股理由", row.get("選股理由", "--")),
+                        ("追價建議", row.get("追價建議", "--")),
+                    ]
+                    cols = st.columns(2 if st.session_state.mobile_mode else 4)
+                    for col, (label, value) in zip(cols, extra_pairs):
                         col.metric(label, value)
-
-            with st.expander("做空策略", expanded=False):
-                short_pairs = [
-                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
-                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
-                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
-                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
-                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
-                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
-                ]
-                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(short_pairs), short_cols_per_row):
-                    cols = st.columns(short_cols_per_row)
-                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
-                        col.metric(label, value)
-                st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
-
-            render_reason_block(row, "本檔判斷理由")
-
-            with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
-                chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
-                if chart_mode == "日K圖":
-                    st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
-                else:
-                    intra_df = download_intraday(st.session_state.selected_code)
-                    st.plotly_chart(make_intraday_figure(intra_df, row), use_container_width=True)
-
-            st.markdown("#### 摘要重點")
-            st.info(row["摘要1"])
-            st.info(row["摘要2"])
-            st.info(row["摘要3"])
-            if row["交易訊號"] == "🔥進場":
-                st.success(f"操作建議：可列入優先觀察，重點看 {row['短期壓力']:.2f} 是否有效站上。")
-            elif row["交易訊號"] == "⏳等待":
-                st.warning(f"操作建議：先等突破或回測確認，不建議在 {row['收盤']:.2f} 直接追價。")
-            elif row["交易訊號"] == "❌不進":
-                st.error("操作建議：目前偏保守，先不進場，等待結構或燈號改善。")
-            else:
-                st.info("操作建議：可持續觀察量價與燈號變化，再決定是否列入候選。")
-
-            with st.expander("短線重點資訊 / 最近標題", expanded=False):
-                news_items = get_stock_news(st.session_state.selected_code)
-                summary_bullets = summarize_event_signals(row, news_items)
-                for b in summary_bullets:
-                    st.info(b)
-                if news_items:
-                    for item in news_items[:2]:
-                        title = item.get("title", "")
-                        meta = "｜".join([x for x in [item.get("publisher", ""), item.get("time", "")] if x])
-                        if item.get("link"):
-                            st.markdown(f"- [{title}]({item['link']})")
-                        else:
-                            st.write(f"- {title}")
-                        if meta:
-                            st.caption(meta)
-                else:
-                    st.caption("目前抓不到新聞資料，因此改以技術面與量價重點為主。")
 
 
 
 
 
 if st.session_state.current_page == "市場儀表板":
-    st.markdown('<div class="main-shell"><h3>📊 市場儀表板</h3><p>正式版市場總覽頁：集中顯示大盤快照、官方補資料狀態與分析結果聚合模組。</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-shell"><h3>📊 市場儀表板</h3><p>正式版市場總覽頁：集中顯示大盤快照、官方補資料狀態與分析結果聚合模組，視覺也開始往全站一致化靠攏。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
     market_info = market_filter()
 
@@ -4432,7 +4887,7 @@ if st.session_state.current_page == "市場儀表板":
         st.caption("正式版原則：先維持主流程穩定，再逐步優化官方資料直連；SSL 直連問題目前列為後續技術債，不阻擋主專案開發。")
 
 if st.session_state.current_page == "持倉中心":
-    st.markdown('<div class="main-shell"><h3>💼 持倉中心</h3><p>依你的實際成本重新判讀部位：輸入買入／放空價格後，直接看支撐、壓力、停損、目標與更貼近實戰語氣的出場建議。</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-shell"><h3>💼 持倉中心</h3><p>依你的實際成本重新判讀部位：輸入買入／放空價格後，直接看支撐、壓力、停損、目標與更貼近實戰語氣的出場建議，並同步對齊正式版欄位順序。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
 
     if st.session_state.get("position_stock_pending"):
@@ -4517,6 +4972,7 @@ if st.session_state.current_page == "持倉中心":
         lv3.metric("停損", fmt_price_with_unit(plan.get("stop")))
         lv4.metric("第一目標", fmt_price_with_unit(plan.get("target1")))
         lv5.metric("第二目標", fmt_price_with_unit(plan.get("target2")))
+        st.caption("持倉中心核心閱讀順序已同步對齊正式版：先看價格 / 成本，再看停損、壓力、目標與結論。")
 
         rv1, rv2, rv3, rv4, rv5 = st.columns(5 if not st.session_state.mobile_mode else 5)
         rv1.metric("到停損風險", (f"{plan.get('risk_pct'):.2f}%" if plan.get("risk_pct") is not None else "--"))
@@ -4572,87 +5028,151 @@ if st.session_state.current_page == "持倉中心":
 
 
 if st.session_state.current_page == "快照中心":
-    st.markdown('<div class="main-shell"><h3>🕘 快照中心</h3><p>正式版快照工作區：集中管理盤前／盤後快照、名單比對與驗證結果。</p></div>', unsafe_allow_html=True)
-    st.caption(f"目前使用者：{st.session_state.current_user}")
+    st.markdown('<div class="main-shell"><h3>🕘 快照中心</h3><p>正式版快照工作區：保留快照中心三層閱讀架構，這版進一步收尾版面、壓縮摘要卡並和全站欄位順序對齊。</p></div>', unsafe_allow_html=True)
+    st.caption(f"目前使用者：{st.session_state.current_user}｜維持 TWSE / TPEx 補資料邏輯；若官方資料異常，視為技術債，不阻擋正式版整理。")
+
     results = st.session_state.results_data
-    with st.container(border=True):
+    market_info = market_filter()
+    snapshots = load_snapshots()
+    df_snap = pd.DataFrame(snapshots) if snapshots else pd.DataFrame()
+
+    pre_count = 0
+    post_count = 0
+    unique_stocks = 0
+    latest_time = "--"
+    batch_summary = pd.DataFrame()
+
+    if not df_snap.empty:
+        if "類型" in df_snap.columns:
+            pre_count = int((df_snap["類型"] == "盤前").sum())
+            post_count = int((df_snap["類型"] == "盤後").sum())
+        if "股票" in df_snap.columns:
+            unique_stocks = int(df_snap["股票"].dropna().nunique())
+        if "時間" in df_snap.columns:
+            latest_time = str(df_snap["時間"].astype(str).max())
+
+        batch_base = df_snap.copy()
+        if "類型" in batch_base.columns:
+            batch_base = batch_base[batch_base["類型"].isin(["盤前", "盤後"])]
+        if not batch_base.empty and {"時間", "類型", "股票"}.issubset(batch_base.columns):
+            batch_summary = (
+                batch_base.groupby(["時間", "類型"], as_index=False)
+                .agg(檔數=("股票", "count"), 涵蓋股票=("股票", "nunique"))
+                .sort_values(["時間", "類型"], ascending=[False, True])
+            )
+            preview_map = (
+                batch_base.groupby(["時間", "類型"])["股票"]
+                .apply(lambda s: "、".join(list(dict.fromkeys([str(x) for x in s if str(x).strip()]))[:5]))
+                .reset_index(name="股票預覽")
+            )
+            batch_summary = batch_summary.merge(preview_map, on=["時間", "類型"], how="left")
+
+    top_left, top_right = st.columns([1.25, 1.0])
+
+    with top_left.container(border=True):
+        st.markdown("### 快照摘要")
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("總快照數", int(len(df_snap)) if not df_snap.empty else 0)
+        q2.metric("盤前快照", pre_count)
+        q3.metric("盤後快照", post_count)
+        q4.metric("涵蓋股票", unique_stocks)
+        st.caption(f"最近一筆快照時間：{latest_time}")
+        if batch_summary.empty:
+            st.info("目前尚未建立可用批次摘要。你可以先到分析中心跑出結果，再回來儲存盤前／盤後快照。")
+        else:
+            st.markdown("#### 最近批次")
+            st.dataframe(batch_summary.head(8), use_container_width=True, hide_index=True)
+
+    with top_right.container(border=True):
         st.markdown("### 快照儲存")
-        st.caption("盤前快照負責定義名單；盤後資訊可直接從盤前名單一鍵產生對照。")
+        current_result_count = len(results) if results else 0
+        act1, act2 = st.columns(2)
+        act1.metric("目前分析名單", current_result_count)
+        act2.metric("可直接儲存", "是" if current_result_count > 0 else "否")
+        st.caption("盤前快照負責定義名單；盤後可另外保存，或直接用下方的盤前名單一鍵產生盤後對照。")
         if results:
             s1, s2 = st.columns(2)
             if s1.button("儲存盤前快照", use_container_width=True):
                 save_snapshot("盤前", results)
                 st.success("已儲存盤前快照。")
+                st.rerun()
             if s2.button("儲存盤後快照", use_container_width=True):
                 save_snapshot("盤後", results)
                 st.success("已儲存盤後快照。")
+                st.rerun()
         else:
             st.info("請先到『分析中心』跑出分析結果，再來儲存快照。")
 
-    snapshots = load_snapshots()
-    df_snap = pd.DataFrame(snapshots) if snapshots else pd.DataFrame()
+    tab_hist, tab_pair, tab_batch = st.tabs(["快照歷史", "雙快照比對", "盤前名單盤後對照"])
 
-    with st.expander("快照管理", expanded=False):
-        st.markdown("### 快照管理")
+    with tab_hist:
+        st.markdown("### 快照歷史")
         if df_snap.empty:
             st.caption("目前沒有快照紀錄。")
         else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                stock_options = ["全部"] + sorted(df_snap["股票"].dropna().unique().tolist())
-                hist_stock = st.selectbox("選擇股票", stock_options, index=0, key="hist_stock")
-            with c2:
-                type_options = ["全部", "盤前", "盤後"]
-                hist_type = st.selectbox("選擇類型", type_options, index=0, key="hist_type")
+            if not batch_summary.empty:
+                st.caption("先看每次儲存批次，再決定是否往下展開原始快照明細。")
+                st.dataframe(batch_summary, use_container_width=True, hide_index=True)
 
-            hist_base = df_snap.copy()
-            if "類型" in hist_base.columns:
-                hist_base = hist_base[hist_base["類型"].isin(["盤前", "盤後"])]
-            if hist_stock != "全部":
-                hist_base = hist_base[hist_base["股票"] == hist_stock]
-            if hist_type != "全部":
-                hist_base = hist_base[hist_base["類型"] == hist_type]
+            with st.expander("查看原始快照與清理", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    stock_options = ["全部"] + sorted(df_snap["股票"].dropna().unique().tolist()) if "股票" in df_snap.columns else ["全部"]
+                    hist_stock = st.selectbox("選擇股票", stock_options, index=0, key="hist_stock")
+                with c2:
+                    type_options = ["全部", "盤前", "盤後"]
+                    hist_type = st.selectbox("選擇類型", type_options, index=0, key="hist_type")
 
-            batch_options = []
-            if not hist_base.empty and "時間" in hist_base.columns:
-                batch_counts = hist_base.groupby("時間").size().sort_index(ascending=False)
-                batch_options = [f"{t}｜{int(n)}檔" for t, n in batch_counts.items()]
+                hist_base = df_snap.copy()
+                if "類型" in hist_base.columns:
+                    hist_base = hist_base[hist_base["類型"].isin(["盤前", "盤後"])]
+                if hist_stock != "全部" and "股票" in hist_base.columns:
+                    hist_base = hist_base[hist_base["股票"] == hist_stock]
+                if hist_type != "全部" and "類型" in hist_base.columns:
+                    hist_base = hist_base[hist_base["類型"] == hist_type]
 
-            with c3:
-                hist_batch = st.selectbox("選擇儲存時段", batch_options, index=0, key="hist_batch") if batch_options else ""
+                batch_options = []
+                if not hist_base.empty and "時間" in hist_base.columns:
+                    batch_counts = hist_base.groupby("時間").size().sort_index(ascending=False)
+                    batch_options = [f"{t}｜{int(n)}檔" for t, n in batch_counts.items()]
 
-            hist = hist_base.copy()
-            if hist_batch:
-                selected_time = hist_batch.split("｜")[0]
-                hist = hist[hist["時間"].astype(str) == selected_time]
-            else:
+                with c3:
+                    hist_batch = st.selectbox("選擇儲存時段", batch_options, index=0, key="hist_batch") if batch_options else ""
+
+                hist = hist_base.copy()
                 selected_time = ""
+                if hist_batch:
+                    selected_time = hist_batch.split("｜")[0]
+                    hist = hist[hist["時間"].astype(str) == selected_time]
 
-            hist = hist.sort_values(["時間", "股票"], ascending=[False, True])
+                if not hist.empty:
+                    hist = hist.sort_values(["時間", "股票"], ascending=[False, True])
+                    st.caption(f"目前篩選共 {len(hist)} 筆；刪除只會作用在下表看到的資料。")
+                else:
+                    st.caption("目前篩選後沒有資料。")
 
-            if not hist.empty:
-                st.caption(f"{selected_time} 共 {len(hist)} 檔")
-            snap_cols = [c for c in ["時間","類型","股票","收盤","進場","停損","短期壓力","中繼目標","突破目標","風報比","結論","交易訊號"] if c in hist.columns]
-            st.dataframe(hist[snap_cols], use_container_width=True, hide_index=True)
+                snap_cols = [c for c in ["時間", "類型", "股票", "收盤", "進場", "停損", "短期壓力", "中繼目標", "突破目標", "風報比", "結論", "交易訊號"] if c in hist.columns]
+                if snap_cols:
+                    st.dataframe(hist[snap_cols], use_container_width=True, hide_index=True)
 
-            d1, d2 = st.columns(2)
-            if d1.button("刪除目前篩選結果", use_container_width=True):
-                delete_keys = set(hist.apply(lambda r: (r.get("時間",""), r.get("類型",""), r.get("股票","")), axis=1).tolist())
-                remain = []
-                for s in snapshots:
-                    key = (s.get("時間",""), s.get("類型",""), s.get("股票",""))
-                    if key not in delete_keys:
-                        remain.append(s)
-                save_snapshots(remain)
-                st.success("已刪除目前篩選結果的快照。")
-                st.rerun()
+                d1, d2 = st.columns(2)
+                if d1.button("刪除目前篩選結果", use_container_width=True):
+                    delete_keys = set(hist.apply(lambda r: (r.get("時間", ""), r.get("類型", ""), r.get("股票", "")), axis=1).tolist()) if not hist.empty else set()
+                    remain = []
+                    for s in snapshots:
+                        key = (s.get("時間", ""), s.get("類型", ""), s.get("股票", ""))
+                        if key not in delete_keys:
+                            remain.append(s)
+                    save_snapshots(remain)
+                    st.success("已刪除目前篩選結果的快照。")
+                    st.rerun()
 
-            if d2.button("清空全部快照", use_container_width=True):
-                save_snapshots([])
-                st.success("已清空全部快照。")
-                st.rerun()
+                if d2.button("清空全部快照", use_container_width=True):
+                    save_snapshots([])
+                    st.success("已清空全部快照。")
+                    st.rerun()
 
-    with st.expander("盤前 / 盤後雙比對", expanded=False):
+    with tab_pair:
         st.markdown("### 盤前 / 盤後雙比對")
         if df_snap.empty:
             st.caption("目前沒有可比對的快照。")
@@ -4670,12 +5190,10 @@ if st.session_state.current_page == "快照中心":
 
                 pre_df = cmp_stock_df[cmp_stock_df["類型"] == "盤前"].sort_values("時間", ascending=False)
                 post_df = cmp_stock_df[cmp_stock_df["類型"] == "盤後"].sort_values("時間", ascending=False)
-
-                st.caption("預設抓這檔股票最新的盤前與最新的盤後快照，你也可以手動改時間。")
+                st.caption("V129 保留三層結構，但把摘要卡、差異摘要與單股細節的閱讀順序再往正式版收斂。")
 
                 pre_options = pre_df["時間"].tolist() if not pre_df.empty else ["無資料"]
                 post_options = post_df["時間"].tolist() if not post_df.empty else ["無資料"]
-
                 sel1, sel2 = st.columns(2)
                 chosen_pre = sel1.selectbox("選擇盤前時間", pre_options, index=0, key="pre_time")
                 chosen_post = sel2.selectbox("選擇盤後時間", post_options, index=0, key="post_time")
@@ -4683,384 +5201,260 @@ if st.session_state.current_page == "快照中心":
                 if not pre_df.empty and not post_df.empty:
                     pre_row = pre_df[pre_df["時間"] == chosen_pre].iloc[0].to_dict()
                     post_row = post_df[post_df["時間"] == chosen_post].iloc[0].to_dict()
+                    compare_table = build_pre_post_compare_table(pre_row, post_row)
+                    diff_count = int((compare_table["是否變化"] == "是").sum()) if not compare_table.empty else 0
+                    pair_price_change = compare_price_change(pre_row.get("收盤", ""), post_row.get("收盤", ""))
+                    pair_structure = build_pair_structure_label(pre_row, post_row)
+                    changed_preview = "、".join(compare_table.loc[compare_table["是否變化"] == "是", "欄位"].tolist()[:5]) if not compare_table.empty else ""
+                    pair_detail_row = {
+                        "價量結論": post_row.get("價量結論", ""),
+                        "價格變化": pair_price_change,
+                        "結構變化": pair_structure,
+                        "盤前收盤": pre_row.get("收盤", ""),
+                        "盤後收盤": post_row.get("收盤", ""),
+                        "盤前支撐": pre_row.get("支撐", ""),
+                        "盤後最低": post_row.get("收盤", ""),
+                        "盤前壓力": pre_row.get("短期壓力", ""),
+                        "盤後最高": post_row.get("收盤", ""),
+                        "盤前建議進場": pre_row.get("進場", ""),
+                        "模擬進場價": pre_row.get("進場", ""),
+                        "盤前停損": pre_row.get("停損", ""),
+                        "盤前風報比": pre_row.get("風報比", ""),
+                        "盤後風報比": post_row.get("風報比", ""),
+                        "盤前結論": pre_row.get("結論", ""),
+                        "盤後結論": post_row.get("結論", ""),
+                        "盤前訊號": pre_row.get("交易訊號", ""),
+                        "盤後訊號": post_row.get("交易訊號", ""),
+                        "股票": selected_cmp_stock,
+                        "股票代碼": str(pre_row.get("股票代碼", "") or post_row.get("股票代碼", "")),
+                    }
 
-                    s1, s2, s3, s4 = st.columns(4)
-                    s1.metric("盤前時間", pre_row.get("時間",""))
-                    s2.metric("盤後時間", post_row.get("時間",""))
-                    s3.metric("盤前結論", str(pre_row.get("結論","")))
-                    s4.metric("盤後結論", str(post_row.get("結論","")))
+                    layer_overview, layer_diff, layer_detail = st.tabs(["總覽層", "差異層", "單股細節層"])
 
-                    compare_fields = [
-                        ("收盤", False), ("進場", True), ("停損", True), ("短期壓力", True),
-                        ("中繼目標", True), ("突破目標", True), ("風報比", True),
-                        ("結論", False), ("交易訊號", False), ("趨勢燈號", False),
-                        ("進場燈號", False), ("量能燈號", False),
-                    ]
-
-                    compare_rows = []
-                    for field, numeric in compare_fields:
-                        pre_val = pre_row.get(field, "")
-                        post_val = post_row.get(field, "")
-                        if numeric:
-                            try:
-                                pre_num = float(pre_val)
-                                post_num = float(post_val)
-                                diff = round(post_num - pre_num, 2)
-                                diff_text = f"+{diff}" if diff > 0 else str(diff)
-                            except Exception:
-                                diff_text = "—"
+                    with layer_overview:
+                        a1, a2, a3, a4 = st.columns(4)
+                        a1.metric("盤前時間", pre_row.get("時間", ""))
+                        a2.metric("盤後時間", post_row.get("時間", ""))
+                        a3.metric("有變化欄位", diff_count)
+                        a4.metric("結構判讀", pair_structure)
+                        render_compare_status_cards(pair_detail_row)
+                        if changed_preview:
+                            st.info(f"這次最明顯的變化欄位：{changed_preview}")
                         else:
-                            diff_text = "有變化" if str(pre_val) != str(post_val) else "不變"
+                            st.info("這組盤前 / 盤後快照主要欄位沒有明顯差異。")
+                        overview_cols = [c for c in ["欄位", "盤前", "盤後", "差異"] if c in compare_table.columns]
+                        st.dataframe(compare_table[overview_cols].head(6), use_container_width=True, hide_index=True)
 
-                        compare_rows.append({"欄位": field, "盤前": pre_val, "盤後": post_val, "差異": diff_text})
+                    with layer_diff:
+                        pair_left, pair_right = st.columns([1.0, 1.5])
+                        pair_left.metric("未變動欄位", max(len(compare_table) - diff_count, 0))
+                        changed_only = pair_right.checkbox("只顯示有變化欄位", value=True, key="pair_changed_only")
+                        show_table = compare_table[compare_table["是否變化"] == "是"] if changed_only else compare_table
+                        st.dataframe(show_table, use_container_width=True, hide_index=True)
 
-                    compare_table = pd.DataFrame(compare_rows)
-                    st.dataframe(compare_table, use_container_width=True, hide_index=True)
+                    with layer_detail:
+                        render_compare_status_cards(pair_detail_row)
+                        render_compare_matrix(pair_detail_row)
+                        left_detail, right_detail = st.columns(2)
+                        with left_detail:
+                            st.markdown("#### 盤前快照")
+                            l1, l2, l3 = st.columns(3)
+                            l1.metric("盤前收盤", fmt_price(pre_row.get("收盤", "")))
+                            l2.metric("盤前進場", fmt_price(pre_row.get("進場", "")))
+                            l3.metric("盤前停損", fmt_price(pre_row.get("停損", "")))
+                            l4, l5, l6 = st.columns(3)
+                            l4.metric("盤前壓力", fmt_price(pre_row.get("短期壓力", "")))
+                            l5.metric("盤前風報比", fmt_price(pre_row.get("風報比", "")))
+                            l6.metric("盤前結論", fmt_text(pre_row.get("結論", "")))
+                        with right_detail:
+                            st.markdown("#### 盤後快照")
+                            r1, r2, r3 = st.columns(3)
+                            r1.metric("盤後收盤", fmt_price(post_row.get("收盤", "")))
+                            r2.metric("盤後進場", fmt_price(post_row.get("進場", "")))
+                            r3.metric("盤後停損", fmt_price(post_row.get("停損", "")))
+                            r4, r5, r6 = st.columns(3)
+                            r4.metric("盤後壓力", fmt_price(post_row.get("短期壓力", "")))
+                            r5.metric("盤後風報比", fmt_price(post_row.get("風報比", "")))
+                            r6.metric("盤後結論", fmt_text(post_row.get("結論", "")))
                 else:
                     st.warning("這檔股票目前需要同時有盤前與盤後快照，才能做雙比對。")
 
-    with st.container(border=True):
+    with tab_batch:
         st.markdown("### 盤前名單一鍵盤後對照")
         pre_groups = grouped_prefast_snapshots()
         if not pre_groups:
             st.caption("目前沒有盤前快照名單可供盤後對照。")
         else:
+            group_df = pd.DataFrame([
+                {"時間": g["時間"], "檔數": g["檔數"], "股票預覽": "、".join(g["股票清單"][:5])}
+                for g in pre_groups
+            ])
             options = [f"{g['時間']}｜{g['檔數']}檔" for g in pre_groups]
             chosen_label = st.selectbox("選擇盤前名單", options, index=0, key="batch_pre_group")
             chosen_group = pre_groups[options.index(chosen_label)]
-            st.caption("按下按鈕後，會直接抓這組盤前名單的當前資料，生成盤前 vs 盤後對照，不必先手動再存盤後快照。")
             post_market_status = get_post_market_status(snapshot_time_str=chosen_group["時間"])
-            if post_market_status.get("ready", False):
-                st.success(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
-            else:
-                st.warning(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
 
-            with st.expander("編輯這次盤前名單", expanded=False):
-                st.caption("可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
-                stock_options = chosen_group["股票清單"]
-                selected_remove = st.multiselect("選擇要從這次盤前名單刪除的股票", stock_options, key="remove_pre_stocks")
-                c1, c2 = st.columns(2)
-                c1.dataframe(pd.DataFrame({"目前盤前名單": stock_options}), use_container_width=True, hide_index=True)
-                if c2.button("刪除所選股票", use_container_width=True):
-                    if selected_remove:
-                        delete_selected_from_pre_snapshot(chosen_group["時間"], selected_remove)
+            top_shell = st.container(border=True)
+            with top_shell:
+                render_section_divider("批次操作區", "V129 先把批次摘要壓縮成更像正式版的操作台：左邊看本批資訊，右邊看盤後狀態與操作按鈕。")
+                top_left, top_right = st.columns([1.15, 0.85])
+                with top_left:
+                    preview_text = "、".join(chosen_group["股票清單"][:8]) if chosen_group.get("股票清單") else "--"
+                    render_info_card_grid([
+                        {"label": "批次時間", "value": chosen_group["時間"], "sub": "盤前名單建立時間"},
+                        {"label": "名單預覽", "value": f"{chosen_group['檔數']} 檔", "sub": f"股票預覽：{preview_text}"},
+                    ])
+                    with st.expander("查看全部批次與編輯這次盤前名單", expanded=False):
+                        st.dataframe(group_df, use_container_width=True, hide_index=True)
+                        st.caption("可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
+                        stock_options = chosen_group["股票清單"]
+                        selected_remove = st.multiselect("選擇要從這次盤前名單刪除的股票", stock_options, key="remove_pre_stocks")
+                        c1, c2 = st.columns(2)
+                        c1.dataframe(pd.DataFrame({"目前盤前名單": stock_options}), use_container_width=True, hide_index=True)
+                        if c2.button("刪除所選股票", use_container_width=True):
+                            if selected_remove:
+                                delete_selected_from_pre_snapshot(chosen_group["時間"], selected_remove)
+                                st.session_state.pop("batch_compare_df", None)
+                                st.session_state.pop("batch_compare_label", None)
+                                st.success(f"已從 {chosen_group['時間']} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
+                                st.rerun()
+                            else:
+                                st.warning("請先選擇要刪除的股票。")
+
+                with top_right:
+                    if post_market_status.get("ready", False):
+                        st.success(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
+                    else:
+                        st.warning(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
+                    b1, b2 = st.columns(2)
+                    if b1.button("產生盤後資訊對照", use_container_width=True):
+                        compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map, snapshot_time_str=chosen_group["時間"])
+                        st.session_state["batch_compare_df"] = compare_batch_df
+                        st.session_state["batch_compare_label"] = chosen_label
+                    if b2.button("清除對照結果", use_container_width=True):
                         st.session_state.pop("batch_compare_df", None)
                         st.session_state.pop("batch_compare_label", None)
-                        st.success(f"已從 {chosen_group['時間']} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
                         st.rerun()
+                    saved_label = st.session_state.get("batch_compare_label", "")
+                    if saved_label and saved_label != chosen_label:
+                        st.info(f"目前對照結果仍是：{saved_label}。若要切到現在選的批次，請重新按一次『產生盤後資訊對照』。")
+                    elif saved_label:
+                        st.caption(f"目前載入中的對照結果：{saved_label}")
                     else:
-                        st.warning("請先選擇要刪除的股票。")
+                        st.caption("目前尚未產生這批盤前名單的盤後對照。")
+                    st.caption("操作順序：先確認盤後狀態，再產生對照；若切換批次，請重新產生一次。")
 
-            b1, b2 = st.columns(2)
-            if b1.button("產生盤後資訊對照", use_container_width=True):
-                compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map, snapshot_time_str=chosen_group["時間"])
-                st.session_state["batch_compare_df"] = compare_batch_df
-                st.session_state["batch_compare_label"] = chosen_label
+            batch_summary_tab, batch_diff_tab, batch_detail_tab = st.tabs(["批次摘要", "差異總覽", "單股明細"])
 
-            if b2.button("清除對照結果", use_container_width=True):
-                st.session_state.pop("batch_compare_df", None)
-                st.session_state.pop("batch_compare_label", None)
-                st.rerun()
+            compare_batch_df = st.session_state.get("batch_compare_df") if isinstance(st.session_state.get("batch_compare_df"), pd.DataFrame) else pd.DataFrame()
+            saved_label = st.session_state.get("batch_compare_label", "")
+            has_active_result = isinstance(compare_batch_df, pd.DataFrame) and not compare_batch_df.empty and saved_label == chosen_label
 
-            if "batch_compare_df" in st.session_state and isinstance(st.session_state["batch_compare_df"], pd.DataFrame):
-                st.markdown(f"#### 對照結果：{st.session_state.get('batch_compare_label', '')}")
-                compare_batch_df = st.session_state["batch_compare_df"]
-                if not compare_batch_df.empty:
-                    summary1, summary2, summary3 = st.columns(3)
+            compare_batch_view = pd.DataFrame()
+            structure_filter = "全部"
+            price_filter = "全部"
+            stock_keyword = ""
+            if has_active_result:
+                compare_batch_view = compare_batch_df.copy()
+
+            with batch_summary_tab:
+                st.markdown(f"#### 批次摘要：{chosen_label}")
+                st.caption("這裡只放批次層資訊與最重要摘要，不直接塞全部差異與單股明細。")
+                render_info_card_grid([
+                    {"label": "批次檔數", "value": f"{chosen_group["檔數"]} 檔", "sub": "這次盤前名單的股票數量"},
+                    {"label": "預覽股票數", "value": str(min(len(chosen_group.get("股票清單", [])), 8)), "sub": "摘要區只先顯示前八檔"},
+                    {"label": "盤後可判定", "value": "是" if post_market_status.get("ready", False) else "否", "sub": post_market_status.get("stage", "")},
+                    {"label": "已產生對照", "value": "是" if has_active_result else "否", "sub": "若切換批次需重新產生"},
+                ])
+
+                selected_row_df = group_df[group_df["時間"] == chosen_group["時間"]].copy()
+                if not selected_row_df.empty:
+                    st.dataframe(selected_row_df, use_container_width=True, hide_index=True)
+
+                if has_active_result:
+                    summary1, summary2, summary3, summary4 = st.columns(4)
                     summary1.metric("結構變強", int((compare_batch_df["結構變化"] == "變強").sum()))
                     summary2.metric("結構持平", int((compare_batch_df["結構變化"] == "持平").sum()))
                     summary3.metric("結構變弱", int((compare_batch_df["結構變化"] == "變弱").sum()))
+                    summary4.metric("已完成對照", len(compare_batch_df))
 
-                    st.markdown("##### 總覽")
                     overview_cols = [c for c in [
-                        "股票","股票代碼","價量結論","價格變化","結構變化","盤前收盤","盤後收盤","收盤模擬報酬率%","最高模擬報酬率%",
-                        "支撐驗證","壓力驗證","停損觸發"
+                        "股票", "股票代碼", "價格變化", "結構變化", "盤前收盤", "盤後收盤", "支撐驗證", "壓力驗證", "停損觸發"
                     ] if c in compare_batch_df.columns]
-                    st.dataframe(compare_batch_df[overview_cols], use_container_width=True, hide_index=True)
-
-                    with st.expander("單股詳細對比", expanded=False):
-                        detail_options = compare_batch_df["股票"].tolist()
-
-                        if "detail_compare_stock_idx" not in st.session_state:
-                            st.session_state.detail_compare_stock_idx = 0
-                        if "detail_compare_stock" not in st.session_state and detail_options:
-                            st.session_state.detail_compare_stock = detail_options[0]
-
-                        if not detail_options:
-                            st.session_state.detail_compare_stock_idx = 0
-
-                        def _apply_detail_idx():
-                            if detail_options:
-                                idx = max(0, min(st.session_state.detail_compare_stock_idx, len(detail_options) - 1))
-                                st.session_state.detail_compare_stock_idx = idx
-                                st.session_state.detail_compare_stock = detail_options[idx]
-
-                        def _detail_prev():
-                            if detail_options:
-                                st.session_state.detail_compare_stock_idx = max(0, st.session_state.detail_compare_stock_idx - 1)
-                                _apply_detail_idx()
-
-                        def _detail_next():
-                            if detail_options:
-                                st.session_state.detail_compare_stock_idx = min(len(detail_options) - 1, st.session_state.detail_compare_stock_idx + 1)
-                                _apply_detail_idx()
-
-                        # 若目前 session 裡的股票不存在於新列表，才重設；否則保留使用者手選結果
-                        if detail_options:
-                            current_selected = st.session_state.get("detail_compare_stock", detail_options[0])
-                            if current_selected not in detail_options:
-                                st.session_state.detail_compare_stock_idx = min(st.session_state.detail_compare_stock_idx, len(detail_options) - 1)
-                                _apply_detail_idx()
-                            else:
-                                st.session_state.detail_compare_stock_idx = detail_options.index(current_selected)
-
-                        nav_left, nav_mid, nav_right, metric_col = st.columns([1.2, 5.6, 1.2, 2.2])
-
-                        with nav_left:
-                            st.button("⬅ 上一檔", use_container_width=True, key="detail_prev_stock", on_click=_detail_prev)
-
-                        with nav_mid:
-                            selected_detail_stock = st.selectbox(
-                                "選擇要查看的股票",
-                                detail_options,
-                                key="detail_compare_stock"
-                            )
-                            if detail_options and selected_detail_stock in detail_options:
-                                st.session_state.detail_compare_stock_idx = detail_options.index(selected_detail_stock)
-
-                            if detail_options:
-                                current_pos = st.session_state.detail_compare_stock_idx + 1
-                                st.caption(f"目前第 {current_pos} / {len(detail_options)} 檔：{selected_detail_stock}")
-
-                        with nav_right:
-                            st.button("下一檔 ➡", use_container_width=True, key="detail_next_stock", on_click=_detail_next)
-
-                        selected_detail_stock = st.session_state.get("detail_compare_stock", detail_options[0] if detail_options else "")
-                        detail_row = compare_batch_df[compare_batch_df["股票"] == selected_detail_stock].iloc[0].to_dict()
-                        metric_col.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
-                        render_compare_status_cards(detail_row)
-                        default_entry_val = detail_row.get("模擬進場價", detail_row.get("盤前建議進場", ""))
-                        try:
-                            default_entry_num = float(default_entry_val)
-                        except Exception:
-                            default_entry_num = 0.0
-
-                        detail_code = str(detail_row.get("股票代碼", "")).strip()
-                        if not detail_code:
-                            detail_code = str(detail_row.get("股票", "")).strip()
-                        if " (" in detail_code:
-                            detail_code = detail_code.split(" (", 1)[0].strip()
-
-                        def _calc_sim(entry_val):
-                            sim_data = simulate_entry_from_intraday(detail_code, entry_val, detail_row.get("盤前停損", ""))
-                            return {
-                                "entry": entry_val,
-                                "data": sim_data,
-                                "entry_time": sim_data.get("進場時間", "--"),
-                                "close": sim_data.get("模擬收盤價", ""),
-                                "close_pnl": sim_data.get("收盤模擬損益", ""),
-                                "close_ret": sim_data.get("收盤模擬報酬率%", ""),
-                                "close_result": sim_data.get("收盤模擬結果", "資料不足"),
-                                "high": sim_data.get("模擬最高價", ""),
-                                "high_pnl": sim_data.get("最高模擬損益", ""),
-                                "high_ret": sim_data.get("最高模擬報酬率%", ""),
-                                "high_result": sim_data.get("最高模擬結果", "資料不足"),
-                                "low": sim_data.get("模擬最低價", ""),
-                                "low_pnl": sim_data.get("最低模擬損益", ""),
-                                "low_ret": sim_data.get("最低模擬報酬率%", ""),
-                                "low_result": sim_data.get("最低模擬結果", "資料不足"),
-                            }
-
-                        sim_calc = _calc_sim(float(default_entry_num))
-                        sim_data = sim_calc["data"]
-                        _entry = sim_calc["entry"]
-                        _entry_time = sim_calc["entry_time"]
-                        _close = sim_calc["close"]
-                        _close_pnl = sim_calc["close_pnl"]
-                        _close_ret = sim_calc["close_ret"]
-                        _close_result = sim_calc["close_result"]
-                        _high = sim_calc["high"]
-                        _high_pnl = sim_calc["high_pnl"]
-                        _high_ret = sim_calc["high_ret"]
-                        _high_result = sim_calc["high_result"]
-                        _low = sim_calc["low"]
-                        _low_pnl = sim_calc["low_pnl"]
-                        _low_ret = sim_calc["low_ret"]
-                        _low_result = sim_calc["low_result"]
-
-                        sim_detail_row = detail_row.copy()
-                        sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
-                        sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
-
-                        if st.session_state.mobile_mode:
-                            render_compare_matrix(detail_row)
-                            st.number_input("自訂模擬進場價", min_value=0.0, value=round(float(default_entry_num), 1), step=0.1, format="%.1f", key=f"custom_entry_mobile_{selected_detail_stock}")
-                            mobile_entry = float(st.session_state[f"custom_entry_mobile_{selected_detail_stock}"])
-                            sim_calc = _calc_sim(mobile_entry)
-                            sim_data = sim_calc["data"]
-                            _entry = sim_calc["entry"]
-                            _entry_time = sim_calc["entry_time"]
-                            _close = sim_calc["close"]
-                            _close_pnl = sim_calc["close_pnl"]
-                            _close_ret = sim_calc["close_ret"]
-                            _close_result = sim_calc["close_result"]
-                            _high = sim_calc["high"]
-                            _high_pnl = sim_calc["high_pnl"]
-                            _high_ret = sim_calc["high_ret"]
-                            _high_result = sim_calc["high_result"]
-                            _low = sim_calc["low"]
-                            _low_pnl = sim_calc["low_pnl"]
-                            _low_ret = sim_calc["low_ret"]
-                            _low_result = sim_calc["low_result"]
-                            sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
-                            sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
-                            render_sim_matrix(_entry_time, _close, _close_result, _close_pnl, _close_ret, _high, _high_result, _high_pnl, _high_ret, _low, _low_result, _low_pnl, _low_ret)
-                            render_reason_block(detail_row, "這檔為何這樣判斷")
-
-                            mobile_tabs = st.tabs(["對照重點", "盤前明細", "盤後明細"])
-                            with mobile_tabs[0]:
-                                top_a, top_b = st.columns(2)
-                                top_a.metric("股票", detail_row.get("股票", ""))
-                                top_b.metric("代碼", detail_row.get("股票代碼", ""))
-                                top_c, top_d = st.columns(2)
-                                top_c.metric("快照時間", detail_row.get("盤前快照時間", ""))
-                                top_d.metric("價格變化", detail_row.get("價格變化", ""))
-                                top_i, top_j = st.columns(2)
-                                top_i.metric("結構變化", detail_row.get("結構變化", detail_row.get("變化判斷", "")))
-                                top_j.metric("價量結論", detail_row.get("價量結論", ""))
-                                top_e, top_f = st.columns(2)
-                                top_e.metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
-                                top_f.metric("模擬進場價", fmt_price(_entry))
-                                top_g, top_h = st.columns(2)
-                                top_g.metric("是否可成交", fmt_text(sim_detail_row.get("是否可成交", "")))
-                                top_h.metric("進場時間", fmt_text(_entry_time))
-                            with mobile_tabs[1]:
-                                pre_cols_2 = st.columns(2)
-                                pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
-                                pre_cols_2[1].metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
-                                pre_cols_3 = st.columns(2)
-                                pre_cols_3[0].metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
-                                pre_cols_3[1].metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
-                                pre_cols_4 = st.columns(2)
-                                pre_cols_4[0].metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
-                                pre_cols_4[1].metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
-                                st.metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
-                            with mobile_tabs[2]:
-                                post_cols_1 = st.columns(2)
-                                post_cols_1[0].metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
-                                post_cols_1[1].metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
-                                post_cols_2 = st.columns(2)
-                                post_cols_2[0].metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
-                                post_cols_2[1].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
-                                post_cols_3 = st.columns(2)
-                                post_cols_3[0].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
-                                post_cols_3[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
-                        else:
-                            detail_layout = 2
-                            detail_cols = st.columns(detail_layout)
-                            d1 = detail_cols[0]
-                            d2 = detail_cols[1]
-
-                            with d1:
-                                st.markdown("###### 盤前資料")
-                                pre_cols_1 = st.columns(3)
-                                pre_cols_1[0].metric("股票", detail_row.get("股票", ""))
-                                pre_cols_1[1].metric("代碼", detail_row.get("股票代碼", ""))
-                                pre_cols_1[2].metric("快照時間", detail_row.get("盤前快照時間", ""))
-
-                                pre_cols_2 = st.columns(3)
-                                pre_cols_2[0].metric("盤前收盤", fmt_price(detail_row.get("盤前收盤", "")))
-                                pre_cols_2[1].metric("盤前支撐", fmt_price(detail_row.get("盤前支撐", "")))
-                                pre_cols_2[2].metric("盤前壓力", fmt_price(detail_row.get("盤前壓力", "")))
-
-                                pre_cols_3 = st.columns(3)
-                                pre_cols_3[0].metric("盤前建議進場", fmt_price(detail_row.get("盤前建議進場", "")))
-                                pre_cols_3[1].metric("盤前停損", fmt_price(detail_row.get("盤前停損", "")))
-                                pre_cols_3[2].metric("盤前風報比", fmt_price(detail_row.get("盤前風報比", "")))
-
-                                pre_cols_4 = st.columns(2)
-                                pre_cols_4[0].metric("盤前結論", fmt_text(detail_row.get("盤前結論", "")))
-                                pre_cols_4[1].metric("盤前訊號", fmt_text(detail_row.get("盤前訊號", "")))
-
-                                st.markdown("###### 驗證結果")
-                                verify_cols = st.columns(4)
-                                verify_cols[0].metric("支撐驗證", fmt_text(detail_row.get("支撐驗證", "")))
-                                verify_cols[1].metric("壓力驗證", fmt_text(detail_row.get("壓力驗證", "")))
-                                verify_cols[2].metric("停損觸發", fmt_text(sim_detail_row.get("停損觸發", "")))
-                                verify_cols[3].metric("是否可成交", fmt_text(sim_detail_row.get("是否可成交", "")))
-                                verify_cols2 = st.columns(3)
-                                verify_cols2[0].metric("價格變化", fmt_text(detail_row.get("價格變化", "")))
-                                verify_cols2[1].metric("結構變化", fmt_text(detail_row.get("結構變化", detail_row.get("變化判斷", ""))))
-                                verify_cols2[2].metric("價量結論", fmt_text(detail_row.get("價量結論", "")))
-                                if detail_row.get("價格變化", "") == "待盤後":
-                                    st.caption("目前仍在盤中或盤後更新期，因此『價格變化 / 結構變化』先標示為待盤後；但價量結論會先顯示當前盤中判讀。")
-
-                            with d2:
-                                with st.container(border=True):
-                                    st.markdown("###### 盤後資料")
-                                    post_cols_1 = st.columns(3)
-                                    post_cols_1[0].metric("盤後收盤", fmt_price(detail_row.get("盤後收盤", "")))
-                                    post_cols_1[1].metric("盤後最高", fmt_price(detail_row.get("盤後最高", "")))
-                                    post_cols_1[2].metric("盤後最低", fmt_price(detail_row.get("盤後最低", "")))
-
-                                    post_cols_2 = st.columns(3)
-                                    post_cols_2[0].metric("盤後風報比", fmt_price(detail_row.get("盤後風報比", "")))
-                                    post_cols_2[1].metric("盤後結論", fmt_text(detail_row.get("盤後結論", "")))
-                                    post_cols_2[2].metric("盤後訊號", fmt_text(detail_row.get("盤後訊號", "")))
-                                    reason_source = detail_row.copy()
-                                    reason_source["風報比"] = detail_row.get("盤後風報比", detail_row.get("盤前風報比", ""))
-                                    render_reason_block(reason_source, "這檔為何這樣判斷")
-
-                                with st.container(border=True):
-                                    st.markdown("###### 收盤模擬")
-                                    custom_entry_price = st.number_input("自訂模擬進場價", min_value=0.0, value=round(float(default_entry_num), 1), step=0.1, format="%.1f", key=f"custom_entry_desktop_{selected_detail_stock}")
-                                    desk_entry = float(custom_entry_price)
-                                    sim_calc = _calc_sim(desk_entry)
-                                    sim_data = sim_calc["data"]
-                                    _entry = sim_calc["entry"]
-                                    _entry_time = sim_calc["entry_time"]
-                                    _close = sim_calc["close"]
-                                    _close_pnl = sim_calc["close_pnl"]
-                                    _close_ret = sim_calc["close_ret"]
-                                    _close_result = sim_calc["close_result"]
-                                    _high = sim_calc["high"]
-                                    _high_pnl = sim_calc["high_pnl"]
-                                    _high_ret = sim_calc["high_ret"]
-                                    _high_result = sim_calc["high_result"]
-                                    _low = sim_calc["low"]
-                                    _low_pnl = sim_calc["low_pnl"]
-                                    _low_ret = sim_calc["low_ret"]
-                                    _low_result = sim_calc["low_result"]
-                                    sim_detail_row["是否可成交"] = sim_data.get("是否可成交", detail_row.get("是否可成交", ""))
-                                    sim_detail_row["停損觸發"] = sim_data.get("停損觸發", detail_row.get("停損觸發", ""))
-
-                                    close_sim_cols = st.columns(4)
-                                    close_sim_cols[0].metric("模擬進場價", fmt_price(_entry))
-                                    close_sim_cols[1].metric("進場時間", fmt_text(_entry_time))
-                                    close_sim_cols[2].metric("模擬收盤價", fmt_price(_close))
-                                    close_sim_cols[3].metric("收盤模擬結果", fmt_text(_close_result))
-
-                                    close_sim_cols_2 = st.columns(3)
-                                    close_sim_cols_2[0].metric("收盤模擬損益", fmt_price(_close_pnl))
-                                    close_sim_cols_2[1].metric("收盤模擬報酬率%", fmt_pct(_close_ret))
-                                    close_sim_cols_2[2].metric("狀態", "收盤")
-
-                                with st.container(border=True):
-                                    st.markdown("###### 最高 / 最低價模擬")
-                                    high_sim_cols = st.columns(3)
-                                    high_sim_cols[0].metric("模擬最高價", fmt_price(_high))
-                                    high_sim_cols[1].metric("最高模擬結果", fmt_text(_high_result))
-                                    high_sim_cols[2].metric("最高模擬報酬率%", fmt_pct(_high_ret))
-
-                                    high_sim_cols_2 = st.columns(3)
-                                    high_sim_cols_2[0].metric("最高模擬損益", fmt_price(_high_pnl))
-                                    high_sim_cols_2[1].metric("模擬最低價", fmt_price(_low))
-                                    high_sim_cols_2[2].metric("最低模擬結果", fmt_text(_low_result))
-
-                                    high_sim_cols_3 = st.columns(3)
-                                    high_sim_cols_3[0].metric("最低模擬損益", fmt_price(_low_pnl))
-                                    high_sim_cols_3[1].metric("最低模擬報酬率%", fmt_pct(_low_ret))
-                                    high_sim_cols_3[2].metric("對照", "成交後")
+                    if overview_cols:
+                        st.markdown("#### 本批次重點總覽")
+                        st.dataframe(compare_batch_df[overview_cols].head(8), use_container_width=True, hide_index=True)
                 else:
-                    st.caption("目前沒有可顯示的對照結果。")
+                    st.info("目前還沒有這批盤前名單的盤後對照結果。先按上方『產生盤後資訊對照』，再往下看差異總覽與單股明細。")
 
+            with batch_diff_tab:
+                render_section_divider("差異總覽", "這裡先看最常變的欄位與目前篩選後的差異輪廓，再決定要不要進到單股明細。")
+                if not has_active_result:
+                    st.caption("請先產生這批盤前名單的盤後對照結果。")
+                else:
+                    f1, f2, f3 = st.columns([1.05, 1.05, 1.4])
+                    structure_filter = f1.selectbox("結構變化篩選", ["全部", "變強", "持平", "變弱"], index=0, key="batch_structure_filter_v129")
+                    price_filter = f2.selectbox("價格變化篩選", ["全部", "上漲", "下跌", "持平", "待盤後", "資料不足"], index=0, key="batch_price_filter_v129")
+                    stock_keyword = f3.text_input("股票關鍵字篩選", value="", key="batch_stock_keyword_v129", placeholder="輸入代碼或名稱")
+
+                    compare_batch_view = compare_batch_df.copy()
+                    if structure_filter != "全部" and "結構變化" in compare_batch_view.columns:
+                        compare_batch_view = compare_batch_view[compare_batch_view["結構變化"] == structure_filter]
+                    if price_filter != "全部" and "價格變化" in compare_batch_view.columns:
+                        compare_batch_view = compare_batch_view[compare_batch_view["價格變化"] == price_filter]
+                    if stock_keyword.strip() and "股票" in compare_batch_view.columns:
+                        kw = stock_keyword.strip()
+                        compare_batch_view = compare_batch_view[
+                            compare_batch_view["股票"].astype(str).str.contains(kw, case=False, na=False)
+                            | compare_batch_view.get("股票代碼", pd.Series(index=compare_batch_view.index, dtype=str)).astype(str).str.contains(kw, case=False, na=False)
+                        ]
+
+                    field_summary = build_batch_field_diff_summary(compare_batch_view)
+                    top_field_summary = field_summary.head(5).copy() if not field_summary.empty else pd.DataFrame()
+                    render_field_highlight_cards(top_field_summary, top_n=3)
+
+                    st.markdown("#### 欄位差異 Top 5")
+                    if not top_field_summary.empty:
+                        st.dataframe(top_field_summary, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("目前沒有可顯示的欄位差異。")
+
+                    diff_focus_cols = [c for c in [
+                        "股票", "價格變化", "結構變化", "盤前結論", "盤後結論", "盤前訊號", "盤後訊號", "判斷理由"
+                    ] if c in compare_batch_view.columns]
+                    with st.expander("查看完整欄位差異與差異股票名單", expanded=False):
+                        if not field_summary.empty:
+                            st.dataframe(field_summary, use_container_width=True, hide_index=True)
+                        if diff_focus_cols:
+                            st.dataframe(compare_batch_view[diff_focus_cols], use_container_width=True, hide_index=True)
+
+            with batch_detail_tab:
+                render_section_divider("單股明細", "這裡只保留名單與單股細節，不再讓總覽與明細同時塞滿同一個區塊。")
+                if not has_active_result:
+                    st.caption("請先產生這批盤前名單的盤後對照結果。")
+                else:
+                    compare_batch_view = compare_batch_df.copy()
+                    if structure_filter != "全部" and "結構變化" in compare_batch_view.columns:
+                        compare_batch_view = compare_batch_view[compare_batch_view["結構變化"] == structure_filter]
+                    if price_filter != "全部" and "價格變化" in compare_batch_view.columns:
+                        compare_batch_view = compare_batch_view[compare_batch_view["價格變化"] == price_filter]
+                    if stock_keyword.strip() and "股票" in compare_batch_view.columns:
+                        kw = stock_keyword.strip()
+                        compare_batch_view = compare_batch_view[
+                            compare_batch_view["股票"].astype(str).str.contains(kw, case=False, na=False)
+                            | compare_batch_view.get("股票代碼", pd.Series(index=compare_batch_view.index, dtype=str)).astype(str).str.contains(kw, case=False, na=False)
+                        ]
+
+                    if compare_batch_view.empty:
+                        st.caption("目前篩選條件下沒有可顯示的股票。")
+                    else:
+                        left_list, right_detail = st.columns([0.95, 1.55])
+                        with left_list:
+                            st.caption(f"目前顯示 {len(compare_batch_view)} / {len(compare_batch_df)} 檔。")
+                            list_cols = [c for c in ["股票", "價格變化", "結構變化", "盤後結論", "盤後訊號"] if c in compare_batch_view.columns]
+                            st.dataframe(compare_batch_view[list_cols], use_container_width=True, hide_index=True)
+                            detail_options = compare_batch_view["股票"].tolist()
+                            selected_detail_stock = st.selectbox("選擇要查看的股票", detail_options, key="detail_compare_stock_v129")
+                        with right_detail:
+                            detail_row = compare_batch_view[compare_batch_view["股票"] == selected_detail_stock].iloc[0].to_dict()
+                            render_batch_compare_detail(detail_row, key_prefix="v129")
