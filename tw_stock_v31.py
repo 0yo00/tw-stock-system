@@ -18,12 +18,12 @@ from plotly.subplots import make_subplots
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "V137"
+APP_VERSION = "V141"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "直接升級法人抓取 HTTP 偵錯，顯示 URL / HTTP / 預覽 / 錯誤，不再只看無資料。"
+APP_VERSION_NOTE = "快照中心盤後狀態文案分級化，明確區分可正式對照、待盤後與非交易日快照，不再只用容易誤解的黃色提示。"
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
-st.markdown("""
+st.markdown(f"""
 <div class="app-sticky-header">
   <div class="app-sticky-title">🚀 台股短線系統 <span>{APP_VERSION_LOWER}</span></div>
 </div>
@@ -1349,7 +1349,7 @@ def build_institutional_signal(code_4digit: str, inst_map: dict, volume: float |
             resonance = '偏多共振'
             score += 2
     elif direction in ['偏空', '小偏空']:
-        score -= 4 if direction == '偏空' else -2
+        score += -4 if direction == '偏空' else -2
         if price_dir == 'down':
             resonance = '偏空共振'
             score -= 2
@@ -2147,15 +2147,17 @@ def build_operation_rating_breakdown(df: pd.DataFrame, row: dict, market_info: d
         "判斷": f"{inst_direction}{inst_ratio_text}｜{row.get('法人共振', '中性')}"
     })
 
+    pre_adjusted_score = max(0, min(100, base_score + market_adj + inst_score))
     raw_total = base_score + market_adj + sum(x["加減分"] for x in extra_items[1:])
     final_score = max(0, min(100, raw_total))
-    star, action = decision_star_and_action(base_score + market_adj, breakout_status, breakout_strength, rr, bias)
+    star, action = decision_star_and_action(pre_adjusted_score, breakout_status, breakout_strength, rr, bias)
 
     return {
         "base_items": base_items,
         "extra_items": extra_items,
         "base_score": base_score,
         "market_adj": market_adj,
+        "pre_adjusted_score": pre_adjusted_score,
         "raw_total": raw_total,
         "final_score": final_score,
         "star": star,
@@ -3866,7 +3868,7 @@ def render_global_banner():
     )
 
 with st.sidebar:
-    st.markdown('<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">V137 法人 HTTP偵錯版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源，這版優先補強三大法人抓取解析，並把快照儲存改成可明確選擇做多 / 做空方向。</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 快照狀態分級版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源；這版重點改為把快照中心的盤後狀態提示改成可直接閱讀的分級文案，避免把待盤後或非交易日誤看成抓取失敗。</div></div>', unsafe_allow_html=True)
     page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -3931,7 +3933,7 @@ with st.sidebar:
             st.caption("目前沒有可刪除的其他使用者。")
 
     st.caption(f"目前資料分流：{st.session_state.current_user}")
-    st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。V137 起若法人資料不足，直接可在分析中心看到 HTTP 偵錯面板；快照中心維持穩定版。</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。V141 將快照中心盤後狀態改成分級文案，明確區分可正式對照、待盤後與非交易日快照。</div></div>', unsafe_allow_html=True)
     st.header("⭐ 我的最愛")
     favs = st.session_state.favorites
     if favs:
@@ -4048,24 +4050,58 @@ def render_market_dashboard(results: list[dict]):
 def auto_pick_general_score(item: dict) -> float:
     score = 0.0
     inst_score = float(item.get("法人分數", 0) or 0)
+    kd_k = float(item.get("KD_K", 50) or 50)
+    bias5 = float(item.get("乖離率5日", 0) or 0)
+
     score += float(item.get("_rank", 0)) * 0.55
-    score += min(float(item.get("量比5日", 0)), 5) * 18
-    score += min(max(float(item.get("量能變化%", 0)), -50), 200) * 0.18
-    score += min(float(item.get("KD_K", 0)), 100) * 0.22
-    score += min(abs(float(item.get("乖離率5日", 0))), 12) * 1.2
+    score += min(float(item.get("量比5日", 0) or 0), 5) * 18
+    score += min(max(float(item.get("量能變化%", 0) or 0), -50), 200) * 0.18
     score += inst_score * 1.2
+
+    if 45 <= kd_k <= 80:
+        score += 12
+    elif kd_k < 45:
+        score += 4
+    else:
+        score -= min(kd_k - 80, 20) * 0.8
+
+    if 0 <= bias5 <= 6:
+        score += 8
+    elif -3 <= bias5 < 0:
+        score += 3
+    elif bias5 > 6:
+        score -= min(bias5 - 6, 10) * 1.2
+    else:
+        score -= min(abs(bias5), 10) * 1.3
+
     if item.get("交易訊號") == "🔥進場":
         score += 18
     elif item.get("交易訊號") == "👀觀察":
         score += 10
-    if item.get("結論") in ["看多", "中性偏多"]:
-        score += 10
+    elif item.get("交易訊號") == "❌不進":
+        score -= 10
+
+    if item.get("結論") == "看多":
+        score += 12
+    elif item.get("結論") == "中性偏多":
+        score += 8
+    elif item.get("結論") in ["看空", "中性偏空"]:
+        score -= 12
+
     if item.get("量能變化") == "量增":
         score += 10
-    if item.get("法人方向") in ["偏多", "小偏多"]:
+    elif item.get("量能變化") == "量縮":
+        score -= 4
+
+    if item.get("法人方向") == "偏多":
         score += 8
-    elif item.get("法人方向") in ["偏空", "小偏空"]:
+    elif item.get("法人方向") == "小偏多":
+        score += 4
+    elif item.get("法人方向") == "偏空":
         score -= 8
+    elif item.get("法人方向") == "小偏空":
+        score -= 4
+
     if item.get("法人共振") == "偏多共振":
         score += 6
     elif item.get("法人共振") == "偏空共振":
@@ -4075,26 +4111,55 @@ def auto_pick_general_score(item: dict) -> float:
 def auto_pick_strict_score(item: dict) -> float:
     score = 0.0
     inst_score = float(item.get("法人分數", 0) or 0)
+    bias5 = float(item.get("乖離率5日", 0) or 0)
+
     score += float(item.get("_rank", 0)) * 0.45
-    score += min(float(item.get("風報比", 0)), 4) * 28
-    score += min(float(item.get("量比5日", 0)), 3) * 8
-    score += max(0, 80 - abs(float(item.get("KD_K", 50)) - 50)) * 0.18
-    score -= min(abs(float(item.get("乖離率5日", 0))), 15) * 1.1
+    score += min(float(item.get("風報比", 0) or 0), 4) * 28
+    score += min(float(item.get("量比5日", 0) or 0), 3) * 8
+    score += max(0, 80 - abs(float(item.get("KD_K", 50) or 50) - 50)) * 0.18
     score += inst_score * 1.35
+
+    if -2 <= bias5 <= 5:
+        score += 6
+    else:
+        score -= min(abs(bias5 - 1.5), 15) * 0.9
+
     if item.get("交易訊號") == "🔥進場":
         score += 16
     elif item.get("交易訊號") == "👀觀察":
         score += 8
+    elif item.get("交易訊號") == "❌不進":
+        score -= 10
+
     if item.get("結論") == "看多":
         score += 16
     elif item.get("結論") == "中性偏多":
         score += 10
+    elif item.get("結論") in ["看空", "中性偏空"]:
+        score -= 14
+
     if item.get("趨勢燈號") == "綠燈":
         score += 10
+    elif item.get("趨勢燈號") == "紅燈":
+        score -= 8
+
     if item.get("進場燈號") == "綠燈":
         score += 10
+    elif item.get("進場燈號") == "紅燈":
+        score -= 8
+
     if item.get("量能變化") == "量增":
         score += 4
+
+    if item.get("法人方向") == "偏多":
+        score += 10
+    elif item.get("法人方向") == "小偏多":
+        score += 5
+    elif item.get("法人方向") == "偏空":
+        score -= 10
+    elif item.get("法人方向") == "小偏空":
+        score -= 5
+
     if item.get("法人共振") == "偏多共振":
         score += 10
     elif item.get("法人共振") == "偏空共振":
@@ -4163,6 +4228,7 @@ def auto_pick_short_score(item: dict) -> float:
     vol_chg = float(item.get("量能變化%", 0) or 0)
     close = _safe_float(item.get("收盤"))
     support = _safe_float(item.get("支撐"))
+    bias5 = float(item.get("乖離率5日", 0) or 0)
     short_rr = calc_short_rr(item)
     inst_score = float(item.get("法人分數", 0) or 0)
     inst_direction = str(item.get("法人方向", "") or "")
@@ -4188,6 +4254,11 @@ def auto_pick_short_score(item: dict) -> float:
         score += 8
     elif pv in ["價漲量增", "跳空上漲爆量"]:
         score -= 16
+
+    if bias5 <= -1:
+        score += min(abs(bias5), 10) * 1.2
+    elif bias5 >= 4:
+        score -= min(bias5, 12) * 1.1
 
     if conclusion == "看空":
         score += 18
@@ -4215,10 +4286,14 @@ def auto_pick_short_score(item: dict) -> float:
 
     score += bearish_signal_hits(item) * 6
     score -= inst_score * 1.1
-    if inst_direction in ["偏空", "小偏空"]:
+    if inst_direction == "偏空":
         score += 10
-    elif inst_direction in ["偏多", "小偏多"]:
+    elif inst_direction == "小偏空":
+        score += 5
+    elif inst_direction == "偏多":
         score -= 10
+    elif inst_direction == "小偏多":
+        score -= 5
     if item.get("法人共振") == "偏空共振":
         score += 8
     elif item.get("法人共振") == "偏多共振":
@@ -4254,6 +4329,10 @@ def build_short_auto_reason(item: dict) -> str:
     return "做空模式：" + "、".join(reasons[:4])
 
 
+def make_snapshot_batch_id(snapshot_time: str, mode: str = "", count: int = 0) -> str:
+    return f"{snapshot_time}|||{mode}|||{count}"
+
+
 def grouped_prefast_snapshots():
     snaps = load_snapshots()
     if not snaps:
@@ -4269,15 +4348,25 @@ def grouped_prefast_snapshots():
     result = []
     for t, rows in groups.items():
         mode = rows[0].get("快照邏輯", detect_strategy_mode(rows[0])) if rows else "多方"
+        count = len(rows)
         result.append({
+            "批次ID": make_snapshot_batch_id(t, mode, count),
             "時間": t,
-            "檔數": len(rows),
+            "檔數": count,
             "股票清單": [r.get("股票", "") for r in rows],
             "快照邏輯": mode,
             "rows": rows
         })
     result.sort(key=lambda x: x["時間"], reverse=True)
     return result
+
+
+def get_prefast_group_map():
+    return {g["批次ID"]: g for g in grouped_prefast_snapshots()}
+
+
+def format_prefast_group_label(group: dict) -> str:
+    return f"{group['時間']}｜{group['檔數']}檔"
 
 
 def delete_selected_from_pre_snapshot(snapshot_time: str, selected_stocks: list[str]):
@@ -4328,100 +4417,178 @@ def get_latest_daily_bar_date(symbol_code: str):
 
 def get_post_market_status(symbol_code: str = "2330.TW", snapshot_time_str: str = ""):
     """
-    V71：
-    以「日線最後一筆日期」優先判斷是否已正式盤後。
-    只有在抓不到日線日期時，才退回分時最後一筆時間做保守判定。
+    V141：
+    先看日線最後日期，再處理非交易日 / 舊分時資料。
+    除了 ready True/False，也把快照狀態改成可直接閱讀的分類：
+    可正式對照 / 僅建立待盤後結果 / 非交易日快照 / 抓取異常。
     """
     snapshot_date = None
+    snapshot_dt = None
     if snapshot_time_str:
         try:
-            snap_dt = pd.to_datetime(snapshot_time_str, errors="coerce")
-            if pd.notna(snap_dt):
-                snapshot_date = snap_dt.date()
+            snapshot_dt = pd.to_datetime(snapshot_time_str, errors="coerce")
+            if pd.notna(snapshot_dt):
+                snapshot_date = snapshot_dt.date()
         except Exception:
+            snapshot_dt = None
             snapshot_date = None
+
+    def _build_status(stage: str, ready: bool, message: str, category: str, tone: str = "info"):
+        return {
+            "stage": stage,
+            "ready": ready,
+            "message": message,
+            "category": category,
+            "tone": tone,
+        }
+
+    def _confirm_post_ready(base_message: str):
+        first = get_latest_ohlc_for_compare(symbol_code)
+        second = get_latest_ohlc_for_compare(symbol_code)
+        required = ["close", "high", "low"]
+        complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
+        consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
+        if complete and consistent:
+            return _build_status(
+                "可正式對照",
+                True,
+                base_message + " 已完成盤後資料二次確認，可直接產生正式盤後對照。",
+                "可正式對照",
+                "success",
+            )
+        return _build_status(
+            "收盤後待更新",
+            False,
+            base_message + " 但盤後資料尚未通過完整/一致檢查，現在只建議先建立待盤後結果。",
+            "僅建立待盤後結果",
+            "info",
+        )
+
+    def _non_trading_message(base: str):
+        return _build_status(
+            "非交易日快照",
+            False,
+            base + " 這批快照建立在非交易日，不建議立即當成正式盤後結果；可先保留待驗名單，等下一交易日收盤後再重新確認。",
+            "非交易日快照",
+            "info",
+        )
 
     try:
         daily_date = get_latest_daily_bar_date(symbol_code)
     except Exception:
         daily_date = None
 
+    if snapshot_date is not None and snapshot_date.weekday() >= 5:
+        base = f"依快照日期 {snapshot_date} 判定：這批建立於週末/假日。"
+        if daily_date is not None:
+            base += f" 目前最新日線資料日期為 {daily_date}。"
+        return _non_trading_message(base)
+
     if snapshot_date is not None and daily_date is not None:
         if daily_date > snapshot_date:
-            return {
-                "stage": "正式盤後",
-                "ready": True,
-                "message": f"依日線資料日期 {daily_date} 判定：已晚於快照日期 {snapshot_date}，這份快照視為正式盤後。"
-            }
+            return _confirm_post_ready(f"依日線資料日期 {daily_date} 判定：已晚於快照日期 {snapshot_date}。")
+
         if daily_date == snapshot_date:
-            first = get_latest_ohlc_for_compare(symbol_code)
-            second = get_latest_ohlc_for_compare(symbol_code)
-            required = ["close", "high", "low"]
-            complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
-            consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
-            if complete and consistent:
-                return {
-                    "stage": "正式盤後",
-                    "ready": True,
-                    "message": f"依日線資料日期 {daily_date} 判定：當天正式收盤資料已生成，且盤後資料完成二次確認。"
-                }
-            return {
-                "stage": "更新中",
-                "ready": False,
-                "message": f"依日線資料日期 {daily_date} 判定：當天正式收盤資料已生成，但盤後資料尚未通過完整/一致檢查。"
-            }
+            return _confirm_post_ready(f"依日線資料日期 {daily_date} 判定：當天正式收盤資料已生成。")
+
+        if daily_date < snapshot_date and snapshot_dt is not None:
+            hhmm_snap = int(snapshot_dt.hour) * 100 + int(snapshot_dt.minute)
+            if hhmm_snap < 900:
+                return _build_status(
+                    "交易日前盤前快照",
+                    False,
+                    f"依日線資料日期 {daily_date} 判定：快照時間 {snapshot_dt.strftime('%m-%d %H:%M')} 早於開盤。現在只能先建立待盤後結果，等收盤後再重新確認。",
+                    "僅建立待盤後結果",
+                    "info",
+                )
+            if hhmm_snap >= 1330:
+                return _build_status(
+                    "收盤後待更新",
+                    False,
+                    f"依日線資料日期 {daily_date} 判定：快照時間 {snapshot_dt.strftime('%m-%d %H:%M')} 已在收盤後，但當日正式盤後資料尚未生成。現在只能先建立待盤後結果。",
+                    "僅建立待盤後結果",
+                    "info",
+                )
+            return _build_status(
+                "交易日盤中快照",
+                False,
+                f"依日線資料日期 {daily_date} 判定：快照時間 {snapshot_dt.strftime('%m-%d %H:%M')} 仍在交易時段。正式價格變化與結構變化需待盤後才能確認。",
+                "僅建立待盤後結果",
+                "info",
+            )
 
     try:
         df_intra = download_intraday(symbol_code)
         if df_intra is None or df_intra.empty or "Datetime" not in df_intra.columns:
-            return {
-                "stage": "更新中",
-                "ready": False,
-                "message": "抓不到可用的日線/分時資料，暫不直接判定盤後。"
-            }
+            return _build_status(
+                "抓取異常",
+                False,
+                "抓不到可用的日線/分時資料，暫時無法判定這批快照是否可正式對照。",
+                "抓取異常",
+                "warning",
+            )
 
         last_dt = pd.to_datetime(df_intra["Datetime"].iloc[-1], errors="coerce")
         if pd.isna(last_dt):
-            return {
-                "stage": "更新中",
-                "ready": False,
-                "message": "分時資料最後時間無法辨識，暫不直接判定盤後。"
-            }
+            return _build_status(
+                "抓取異常",
+                False,
+                "分時資料最後時間無法辨識，暫時無法判定這批快照是否可正式對照。",
+                "抓取異常",
+                "warning",
+            )
 
         market_clock = last_dt.strftime("%m-%d %H:%M")
+        last_date = last_dt.date()
         hhmm = int(last_dt.hour) * 100 + int(last_dt.minute)
 
+        if snapshot_date is not None and last_date < snapshot_date:
+            if snapshot_date.weekday() >= 5:
+                return _non_trading_message(f"依分時最後時間 {market_clock} 判定：快照日期 {snapshot_date} 為非交易日。")
+            if snapshot_dt is not None:
+                hhmm_snap = int(snapshot_dt.hour) * 100 + int(snapshot_dt.minute)
+                if hhmm_snap < 900:
+                    return _build_status(
+                        "交易日前盤前快照",
+                        False,
+                        f"依分時最後時間 {market_clock} 判定：快照時間 {snapshot_dt.strftime('%m-%d %H:%M')} 早於開盤。現在只能先建立待盤後結果，等收盤後再重新確認。",
+                        "僅建立待盤後結果",
+                        "info",
+                    )
+                if hhmm_snap >= 1330:
+                    return _build_status(
+                        "收盤後待更新",
+                        False,
+                        f"依分時最後時間 {market_clock} 判定：分時資料仍停在上一交易日，當日正式盤後資料尚未生成。現在只能先建立待盤後結果。",
+                        "僅建立待盤後結果",
+                        "info",
+                    )
+                return _build_status(
+                    "交易日盤中快照",
+                    False,
+                    f"依分時最後時間 {market_clock} 判定：快照建立在交易時段中，正式價格變化與結構變化需待盤後才能確認。",
+                    "僅建立待盤後結果",
+                    "info",
+                )
+
         if hhmm < 1330:
-            return {
-                "stage": "盤中",
-                "ready": False,
-                "message": f"依分時最後時間 {market_clock} 判定：尚未收盤，盤後資料尚不可用。"
-            }
+            return _build_status(
+                "交易日盤中快照",
+                False,
+                f"依分時最後時間 {market_clock} 判定：市場尚未收盤。現在只能先建立待盤後結果，正式對照需等收盤後再確認。",
+                "僅建立待盤後結果",
+                "info",
+            )
 
-        first = get_latest_ohlc_for_compare(symbol_code)
-        second = get_latest_ohlc_for_compare(symbol_code)
-        required = ["close", "high", "low"]
-        complete = all(str(first.get(k, "")) != "" and str(second.get(k, "")) != "" for k in required)
-        consistent = all(str(first.get(k, "")) == str(second.get(k, "")) for k in required)
-
-        if complete and consistent:
-            return {
-                "stage": "正式盤後",
-                "ready": True,
-                "message": f"依分時最後時間 {market_clock} 判定：已收盤，且盤後資料完成二次確認。"
-            }
-
-        return {
-            "stage": "更新中",
-            "ready": False,
-            "message": f"依分時最後時間 {market_clock} 判定：已收盤，但盤後資料尚未通過完整/一致檢查。"
-        }
+        return _confirm_post_ready(f"依分時最後時間 {market_clock} 判定：已收盤。")
     except Exception as e:
-        return {
-            "stage": "更新中",
-            "ready": False,
-            "message": f"盤後狀態判定失敗：{e}"
-        }
+        return _build_status(
+            "抓取異常",
+            False,
+            f"盤後狀態判定失敗：{e}",
+            "抓取異常",
+            "warning",
+        )
 
 def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot_time_str=""):
     compare_rows = []
@@ -4488,8 +4655,8 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot
             pv_now = now_item.get("價量結論", "")
             if pv_now:
                 current_reason.append(f"價量：{pv_now}")
-            current_reason.append("目前仍在盤中/盤後更新期")
-            current_reason.append("正式價格變化與結構變化需待盤後確認")
+            current_reason.append(f"狀態分類：{market_status.get('category', post_stage)}")
+            current_reason.append(market_status.get("message", "正式價格變化與結構變化需待盤後確認"))
             compare_rows.append({
                 "股票": pre.get("股票", code),
                 "股票代碼": code,
@@ -4506,8 +4673,8 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot
                 "盤後最高": "",
                 "盤後最低": "",
                 "盤後風報比": "",
-                "盤後結論": f"{post_stage}",
-                "盤後訊號": "⏳更新中",
+                "盤後結論": f"{market_status.get('category', post_stage)}",
+                "盤後訊號": "⏳待確認",
                 "支撐驗證": "更新中",
                 "壓力驗證": "更新中",
                 "停損觸發": "更新中",
@@ -5153,7 +5320,7 @@ def render_position_status_chips(chips: list[str]):
 render_global_banner()
 
 if st.session_state.current_page == "分析中心":
-    st.markdown('<div class="main-shell"><h3>📈 分析中心</h3><p>正式版分析工作區：集中處理個股搜尋、自動挑股、補資料命中與單股判讀。V137 補上法人 HTTP 偵錯面板，遇到資料不足可直接看到來源、URL、HTTP 狀態與預覽。</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-shell"><h3>📈 分析中心</h3><p>正式版分析工作區：集中處理個股搜尋、自動挑股、補資料命中與單股判讀。V141 將快照中心盤後狀態改成分級文案；法人資料不足時仍可直接查看偵錯面板。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
     jump_c1, jump_c2 = st.columns([1.2, 4])
     if jump_c1.button("前往市場儀表板", use_container_width=True):
@@ -5590,7 +5757,7 @@ if st.session_state.current_page == "分析中心":
                 score_df = pd.DataFrame(breakdown["base_items"] + breakdown["extra_items"])
                 with st.expander("展開評分加減明細", expanded=False):
                     st.dataframe(score_df, use_container_width=True, hide_index=True)
-                st.caption("評級順序：先算基本分，再加上大盤加權，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
+                st.caption("評級順序：先算基本分，再加上大盤與法人分數，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
                 st.markdown("#### 策略區")
                 st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
 
@@ -5861,7 +6028,7 @@ if st.session_state.current_page == "持倉中心":
         else:
             st.info("目前分析中心尚未選定股票。")
 
-    st.info("V130 之後持倉中心維持計畫追蹤表；V137 則在分析中心補上法人 HTTP 偵錯面板，避免遇到資料不足時只能反覆拆修。")
+    st.info("V130 之後持倉中心維持計畫追蹤表；V141 補強快照中心盤後狀態文案，清楚區分可正式對照與待盤後。")
 
     if calc_position:
         if not str(pos_stock).strip():
@@ -6186,7 +6353,7 @@ if st.session_state.current_page == "快照中心":
 
                 pre_df = cmp_stock_df[cmp_stock_df["類型"] == "盤前"].sort_values("時間", ascending=False)
                 post_df = cmp_stock_df[cmp_stock_df["類型"] == "盤後"].sort_values("時間", ascending=False)
-                st.caption("V137 起快照中心維持穩定版；這版主要補齊法人 HTTP 偵錯與來源診斷，之後再往交易追蹤整合。")
+                st.caption("V141 起快照中心補強盤後狀態文案，明確區分可正式對照、待盤後與非交易日快照。")
 
                 pre_options = pre_df["時間"].tolist() if not pre_df.empty else ["無資料"]
                 post_options = post_df["時間"].tolist() if not post_df.empty else ["無資料"]
@@ -6281,62 +6448,94 @@ if st.session_state.current_page == "快照中心":
         if not pre_groups:
             st.caption("目前沒有盤前快照名單可供盤後對照。")
         else:
+            group_map = {g["批次ID"]: g for g in pre_groups}
+            batch_ids = [g["批次ID"] for g in pre_groups]
+            if st.session_state.get("batch_pre_group_id") not in batch_ids:
+                st.session_state["batch_pre_group_id"] = batch_ids[0]
+
+            selected_batch_id = st.selectbox(
+                "選擇盤前名單",
+                batch_ids,
+                index=batch_ids.index(st.session_state["batch_pre_group_id"]),
+                key="batch_pre_group_id",
+                format_func=lambda bid: format_prefast_group_label(group_map[bid]) if bid in group_map else str(bid),
+            )
+            chosen_group = group_map[selected_batch_id]
+            chosen_label = format_prefast_group_label(chosen_group)
+            chosen_batch_time = chosen_group["時間"]
+            post_market_status = get_post_market_status(snapshot_time_str=chosen_batch_time)
+
             group_df = pd.DataFrame([
-                {"時間": g["時間"], "檔數": g["檔數"], "股票預覽": "、".join(g["股票清單"][:5])}
+                {
+                    "批次時間": g["時間"],
+                    "批次ID": g["批次ID"],
+                    "快照邏輯": g.get("快照邏輯", "多方"),
+                    "檔數": g["檔數"],
+                    "股票預覽": "、".join(g["股票清單"][:5])
+                }
                 for g in pre_groups
             ])
-            options = [f"{g['時間']}｜{g['檔數']}檔" for g in pre_groups]
-            chosen_label = st.selectbox("選擇盤前名單", options, index=0, key="batch_pre_group")
-            chosen_group = pre_groups[options.index(chosen_label)]
-            post_market_status = get_post_market_status(snapshot_time_str=chosen_group["時間"])
+
+            active_batch_id = st.session_state.get("batch_compare_batch_id", "")
+            active_compare_df = st.session_state.get("batch_compare_df") if isinstance(st.session_state.get("batch_compare_df"), pd.DataFrame) else pd.DataFrame()
+            has_active_for_selected = isinstance(active_compare_df, pd.DataFrame) and not active_compare_df.empty and active_batch_id == selected_batch_id
 
             top_shell = st.container(border=True)
             with top_shell:
-                render_section_divider("批次操作區", f"{APP_VERSION} 保留這個批次操作區配置，快照中心先維持穩定版，這版只補方向選擇與資料解析。")
+                render_section_divider("批次操作區", f"{APP_VERSION} 將快照中心盤後狀態改成分級文案；同時維持批次選單、摘要、差異總覽與單股明細的同批次綁定。")
                 top_left, top_right = st.columns([1.15, 0.85])
                 with top_left:
                     preview_text = "、".join(chosen_group["股票清單"][:8]) if chosen_group.get("股票清單") else "--"
                     render_info_card_grid([
-                        {"label": "批次時間", "value": chosen_group["時間"], "sub": "盤前名單建立時間"},
+                        {"label": "批次時間", "value": chosen_batch_time, "sub": "盤前名單建立時間"},
                         {"label": "快照邏輯", "value": chosen_group.get("快照邏輯", "多方"), "sub": "這批盤前快照使用的策略方向"},
                         {"label": "名單預覽", "value": f"{chosen_group['檔數']} 檔", "sub": f"股票預覽：{preview_text}"},
                     ])
                     with st.expander("查看全部批次與編輯這次盤前名單", expanded=False):
-                        st.dataframe(group_df, use_container_width=True, hide_index=True)
-                        st.caption("可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
+                        st.dataframe(group_df.drop(columns=["批次ID"]), use_container_width=True, hide_index=True)
+                        st.caption(f"目前正在編輯批次：{chosen_label}｜{chosen_group.get('快照邏輯', '多方')}。可直接多選要排除的股票，刪除後會保留這次盤前名單的其他股票。")
                         stock_options = chosen_group["股票清單"]
-                        selected_remove = st.multiselect("選擇要從這次盤前名單刪除的股票", stock_options, key="remove_pre_stocks")
+                        selected_remove = st.multiselect("選擇要從這次盤前名單刪除的股票", stock_options, key=f"remove_pre_stocks_{selected_batch_id}")
                         c1, c2 = st.columns(2)
                         c1.dataframe(pd.DataFrame({"目前盤前名單": stock_options}), use_container_width=True, hide_index=True)
-                        if c2.button("刪除所選股票", use_container_width=True):
+                        if c2.button("刪除所選股票", use_container_width=True, key=f"delete_pre_stocks_{selected_batch_id}"):
                             if selected_remove:
-                                delete_selected_from_pre_snapshot(chosen_group["時間"], selected_remove)
+                                delete_selected_from_pre_snapshot(chosen_batch_time, selected_remove)
                                 st.session_state.pop("batch_compare_df", None)
                                 st.session_state.pop("batch_compare_label", None)
-                                st.success(f"已從 {chosen_group['時間']} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
+                                st.session_state.pop("batch_compare_batch_id", None)
+                                st.success(f"已從 {chosen_batch_time} 的盤前名單刪除 {len(selected_remove)} 檔股票。")
                                 st.rerun()
                             else:
                                 st.warning("請先選擇要刪除的股票。")
 
                 with top_right:
-                    if post_market_status.get("ready", False):
-                        st.success(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
+                    status_text = f"盤後狀態：{post_market_status.get('stage', '')}｜{post_market_status.get('message', '')}"
+                    status_tone = post_market_status.get("tone", "info")
+                    if post_market_status.get("ready", False) or status_tone == "success":
+                        st.success(status_text)
+                    elif status_tone == "warning":
+                        st.warning(status_text)
                     else:
-                        st.warning(f"盤後狀態：{post_market_status['stage']}｜{post_market_status['message']}")
+                        st.info(status_text)
                     b1, b2 = st.columns(2)
-                    if b1.button("產生盤後資訊對照", use_container_width=True):
-                        compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map, snapshot_time_str=chosen_group["時間"])
+                    if b1.button("產生盤後資訊對照", use_container_width=True, key=f"create_batch_compare_{selected_batch_id}"):
+                        compare_batch_df = compare_pre_snapshot_with_current(chosen_group["rows"], market_info["score_adj"], name_map, snapshot_time_str=chosen_batch_time)
                         st.session_state["batch_compare_df"] = compare_batch_df
                         st.session_state["batch_compare_label"] = chosen_label
-                    if b2.button("清除對照結果", use_container_width=True):
+                        st.session_state["batch_compare_batch_id"] = selected_batch_id
+                        st.rerun()
+                    if b2.button("清除對照結果", use_container_width=True, key=f"clear_batch_compare_{selected_batch_id}"):
                         st.session_state.pop("batch_compare_df", None)
                         st.session_state.pop("batch_compare_label", None)
+                        st.session_state.pop("batch_compare_batch_id", None)
                         st.rerun()
-                    saved_label = st.session_state.get("batch_compare_label", "")
-                    if saved_label and saved_label != chosen_label:
-                        st.info(f"目前對照結果仍是：{saved_label}。若要切到現在選的批次，請重新按一次『產生盤後資訊對照』。")
-                    elif saved_label:
-                        st.caption(f"目前載入中的對照結果：{saved_label}")
+                    if active_batch_id and active_batch_id != selected_batch_id and isinstance(active_compare_df, pd.DataFrame) and not active_compare_df.empty:
+                        active_group = group_map.get(active_batch_id)
+                        active_label = format_prefast_group_label(active_group) if active_group else st.session_state.get("batch_compare_label", "")
+                        st.info(f"目前載入中的對照結果仍是：{active_label}。若要切到現在選的批次，請重新按一次『產生盤後資訊對照』。")
+                    elif has_active_for_selected:
+                        st.caption(f"目前載入中的對照結果：{chosen_label}")
                     else:
                         st.caption("目前尚未產生這批盤前名單的盤後對照。")
                     st.caption("操作順序：先確認盤後狀態，再產生對照；若切換批次，請重新產生一次。")
@@ -6345,7 +6544,8 @@ if st.session_state.current_page == "快照中心":
 
             compare_batch_df = st.session_state.get("batch_compare_df") if isinstance(st.session_state.get("batch_compare_df"), pd.DataFrame) else pd.DataFrame()
             saved_label = st.session_state.get("batch_compare_label", "")
-            has_active_result = isinstance(compare_batch_df, pd.DataFrame) and not compare_batch_df.empty and saved_label == chosen_label
+            saved_batch_id = st.session_state.get("batch_compare_batch_id", "")
+            has_active_result = isinstance(compare_batch_df, pd.DataFrame) and not compare_batch_df.empty and saved_batch_id == selected_batch_id
 
             compare_batch_view = pd.DataFrame()
             structure_filter = "全部"
@@ -6356,7 +6556,7 @@ if st.session_state.current_page == "快照中心":
 
             with batch_summary_tab:
                 st.markdown(f"#### 批次摘要：{chosen_label}")
-                st.caption("這裡只放批次層資訊與最重要摘要，不直接塞全部差異與單股明細。")
+                st.caption(f"目前鎖定批次 ID：{selected_batch_id}。這裡只放批次層資訊與最重要摘要，不直接塞全部差異與單股明細。")
                 render_info_card_grid([
                     {"label": "批次檔數", "value": f"{chosen_group["檔數"]} 檔", "sub": "這次盤前名單的股票數量"},
                     {"label": "預覽股票數", "value": str(min(len(chosen_group.get("股票清單", [])), 8)), "sub": "摘要區只先顯示前八檔"},
@@ -6364,9 +6564,9 @@ if st.session_state.current_page == "快照中心":
                     {"label": "已產生對照", "value": "是" if has_active_result else "否", "sub": "若切換批次需重新產生"},
                 ])
 
-                selected_row_df = group_df[group_df["時間"] == chosen_group["時間"]].copy()
+                selected_row_df = group_df[group_df["批次ID"] == selected_batch_id].copy()
                 if not selected_row_df.empty:
-                    st.dataframe(selected_row_df, use_container_width=True, hide_index=True)
+                    st.dataframe(selected_row_df.drop(columns=["批次ID"]), use_container_width=True, hide_index=True)
 
                 if has_active_result:
                     summary1, summary2, summary3, summary4 = st.columns(4)
@@ -6451,7 +6651,7 @@ if st.session_state.current_page == "快照中心":
                             list_cols = [c for c in ["股票", "價格變化", "結構變化", "盤後結論", "盤後訊號"] if c in compare_batch_view.columns]
                             st.dataframe(compare_batch_view[list_cols], use_container_width=True, hide_index=True)
                             detail_options = compare_batch_view["股票"].tolist()
-                            selected_detail_stock = st.selectbox("選擇要查看的股票", detail_options, key="detail_compare_stock_v129")
+                            selected_detail_stock = st.selectbox("選擇要查看的股票", detail_options, key=f"detail_compare_stock_{selected_batch_id}")
                         with right_detail:
                             detail_row = compare_batch_view[compare_batch_view["股票"] == selected_detail_stock].iloc[0].to_dict()
                             render_batch_compare_detail(detail_row, key_prefix="v129")
