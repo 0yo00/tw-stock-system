@@ -16,12 +16,13 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import candidate_engine as ce
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "V151"
+APP_VERSION = "V159"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "TPEx法人欄位解析修正版：依偵錯面板實際回傳欄位補上上櫃 OpenAPI 英文欄位對應，修正 6147.TWO 這類有回應但未命中的問題。"
+APP_VERSION_NOTE = "候選池引擎第二階段加速穩定版：單股搜尋走獨立快取路徑，候選池分析改為逐股快取＋失敗冷卻＋偵錯摘要，先確認 250 檔速度與穩定性。"
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
@@ -501,55 +502,14 @@ def load_name_map():
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def build_candidate_pool_250(name_map: dict, max_price: float = 1100.0, target_count: int = 250):
-    """
-    動態候選池：
-    1. 先保留原本 187 檔 watchlist_default 的順序
-    2. 再從完整名稱字典補股
-    3. 只保留有資料、且最新收盤 <= 1100 的股票
-    4. 補滿到 250 檔為止
-    """
-    ordered_codes = []
-    seen = set()
-
-    # 原本 187 檔優先
-    for code in watchlist_default:
-        c = str(code).strip()
-        if c and c not in seen:
-            ordered_codes.append(c)
-            seen.add(c)
-
-    # 再從完整字典補齊
-    for full_code in name_map.keys():
-        full_code = str(full_code).upper().strip()
-        if not full_code:
-            continue
-        base_code = full_code.split(".")[0]
-        if re.fullmatch(r"\d{4}", base_code) and base_code not in seen:
-            ordered_codes.append(base_code)
-            seen.add(base_code)
-
-    pool = []
-    for code in ordered_codes:
-        resolved_code, raw_df = resolve_symbol(code)
-        if raw_df is None or raw_df.empty or len(raw_df) < 20:
-            continue
-        try:
-            df = indicators(raw_df)
-        except Exception:
-            continue
-        if df is None or df.empty:
-            continue
-        try:
-            close = float(df["Close"].iloc[-1])
-        except Exception:
-            continue
-        if close > max_price:
-            continue
-        pool.append(code)
-        if len(pool) >= target_count:
-            break
-
-    return pool
+    return ce.build_candidate_pool_250(
+        name_map=name_map,
+        resolve_symbol=resolve_symbol,
+        indicators=indicators,
+        watchlist_default=watchlist_default,
+        max_price=max_price,
+        target_count=target_count,
+    )
 
 
 def load_favorites():
@@ -3255,170 +3215,98 @@ def liquidity_auto_bonus(item: dict, mode: str = "general") -> float:
         score -= 8.0
     return round(score, 2)
 
-def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
-    name_map = name_map or load_name_map()
-    resolved_code, raw_df = resolve_symbol(raw_stock)
-    if raw_df.empty or len(raw_df) < 20:
-        return None
+CANDIDATE_FAIL_COOLDOWN_MINUTES = 20
 
+
+def _analysis_refresh_tag() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _candidate_stock_cache_key(raw_stock: str, market_adj: int = 0):
+    return (str(raw_stock).strip().upper(), int(market_adj or 0), _analysis_refresh_tag(), APP_VERSION)
+
+
+def _candidate_fail_key(raw_stock: str) -> str:
+    return str(raw_stock).strip().upper()
+
+
+def _candidate_stock_cache_get(raw_stock: str, market_adj: int = 0):
+    cache = st.session_state.setdefault("_candidate_stock_cache", {})
+    item = cache.get(_candidate_stock_cache_key(raw_stock, market_adj))
+    return dict(item) if isinstance(item, dict) else None
+
+
+def _candidate_stock_cache_set(raw_stock: str, market_adj: int, item: dict | None):
+    if not isinstance(item, dict):
+        return
+    cache = st.session_state.setdefault("_candidate_stock_cache", {})
+    cache[_candidate_stock_cache_key(raw_stock, market_adj)] = dict(item)
+    if len(cache) > 1200:
+        for old_key in list(cache.keys())[:300]:
+            cache.pop(old_key, None)
+
+
+def _candidate_fail_cooldown_active(raw_stock: str):
+    fail_map = st.session_state.setdefault("_candidate_fail_cooldown", {})
+    key = _candidate_fail_key(raw_stock)
+    meta = fail_map.get(key)
+    if not isinstance(meta, dict):
+        return False, None
+    until_iso = meta.get("until")
     try:
-        df = indicators(raw_df)
-    except Exception as e:
-        print(f"analyze_one failed: {raw_stock} / {e}")
-        return None
+        until_dt = datetime.fromisoformat(str(until_iso))
+    except Exception:
+        fail_map.pop(key, None)
+        return False, None
+    if datetime.now() >= until_dt:
+        fail_map.pop(key, None)
+        return False, None
+    return True, meta
 
-    if df.empty or len(df) < 20:
-        return None
 
-    close = round(float(df["Close"].iloc[-1]), 2)
-
-    high5 = float(df["High"].tail(5).max()); low5 = float(df["Low"].tail(5).min())
-    high10 = float(df["High"].tail(10).max()); low10 = float(df["Low"].tail(10).min())
-    ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
-    ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else close
-    atr = float(df["atr"].iloc[-1]) if pd.notna(df["atr"].iloc[-1]) else max(close * 0.02, 0.5)
-    vol = float(df["Volume"].iloc[-1]); vol_prev = float(df["Volume"].iloc[-2]) if len(df) >= 2 else vol
-    vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
-    k = float(df["k"].iloc[-1]) if pd.notna(df["k"].iloc[-1]) else 50
-    d = float(df["d"].iloc[-1]) if pd.notna(df["d"].iloc[-1]) else 50
-    bias5 = float(df["bias5"].iloc[-1]) if pd.notna(df["bias5"].iloc[-1]) else 0
-    code4 = resolved_code.split(".")[0]
-    liquidity_info = build_liquidity_profile(df)
-    inst_bundle = fetch_institutional_bundle_all()
-    inst_map = inst_bundle.get("map", {})
-    prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else close
-    inst_info = build_institutional_signal(resolved_code, inst_map, vol, close, prev_close)
-    inst_hit = bool(get_stock_institutional(resolved_code, inst_map))
-    market_key = 'TPEx' if resolved_code.endswith('.TWO') else 'TWSE'
-    inst_info["法人資料源"] = (inst_bundle.get("sources", {}) or {}).get(market_key, "NONE")
-    inst_info["法人資料市場"] = market_key
-    inst_info["法人命中代碼"] = "是" if inst_hit else "否"
-    inst_info["法人偵錯摘要"] = "；".join(
-        f"{x.get('市場','')}:{x.get('來源','')}:{x.get('解析命中',0)}"
-        for x in inst_bundle.get("debug", [])[:8]
-    )
-
-    support_candidates = [x for x in [low5, low10, ma5, ma20] if x < close and x > close * 0.93]
-    support = max(support_candidates) if support_candidates else max([x for x in [low5, low10, ma5, ma20] if x < close] or [close * 0.96])
-    resistance_candidates = [x for x in [high5, high10] if x > close and x < close * 1.12]
-    resistance = min(resistance_candidates) if resistance_candidates else close + atr * 0.8
-    breakout_base = max(high10, resistance)
-    mid_target = breakout_base + atr * 0.8
-    final_target = breakout_base + atr * 1.6
-
-    support = round(float(support), 2); resistance = round(float(resistance), 2)
-    mid_target = round(float(mid_target), 2); final_target = round(float(final_target), 2); atr = round(float(atr), 2)
-
-    breakout_status, breakout_strength, chase = breakout_analysis(df, resistance)
-    score = max(0, calculate_score(df) + market_adj + int(inst_info.get("法人分數", 0) or 0))
-    bias = market_bias(df)
-
-    dist_support_pct = (close - support) / close if close else 0
-    dist_resist_pct = (resistance - close) / close if close else 0
-    if breakout_status == "已突破":
-        entry = close * 0.996
-    elif dist_resist_pct <= 0.03:
-        entry = max(support + atr * 0.35, close - atr * 0.45)
-    elif dist_support_pct <= 0.03:
-        entry = support + atr * 0.2
-    else:
-        entry = max(support + atr * 0.3, close - atr * 0.35)
-    entry = round(float(min(entry, close * 0.995)), 2)
-    stop = round(float(support - atr * 0.25), 2)
-    short_target = resistance
-    rr = round((short_target - entry) / max(entry - stop, 0.01), 2)
-
-    star, action_label = decision_star_and_action(score, breakout_status, breakout_strength, rr, bias)
-    conclusion = trend_conclusion(action_label, breakout_status, bias)
-    signal = signal_label(action_label, breakout_status, rr)
-    reason, rsi_round = build_reason(df, breakout_status)
-
-    bucket = rank_bucket(signal, conclusion, action_label)
-    bucket_score = {"A_優先關注": 300, "B_中性觀察": 200, "C_保守追蹤": 100, "D_後段排除": 0}[bucket]
-    vol_ratio = round(vol / vol5, 2) if vol5 else 1.0
-    rank = (
-        bucket_score
-        + signal_priority(signal) * 20
-        + conclusion_priority(conclusion) * 12
-        + action_priority(action_label) * 10
-        + min(max(rr, 0), 3) * 5
-        + (4 if breakout_strength == "強" else 2 if breakout_strength == "普通" else 0)
-        + min(max(vol_ratio, 0), 3) * 3
-        + (3 if k > d else 0)
-        + int(inst_info.get("法人分數", 0) or 0) * 2
-    )
-    vol_change_pct = round((vol - vol_prev) / vol_prev * 100, 2) if vol_prev else 0.0
-    vol_trend = "量增" if vol_change_pct > 0 else "量縮" if vol_change_pct < 0 else "持平"
-    pv_label, pv_light, pv_reasons = price_volume_analysis(df)
-    dist_support = round((close - support) / close * 100, 1) if close else 0
-    dist_resistance = round((resistance - close) / close * 100, 1) if close else 0
-    dist_target = round((final_target - close) / close * 100, 1) if close else 0
-
-    return {
-        "股票": display_name(resolved_code, name_map), "股票代碼": resolved_code, "族群": stock_sector.get(resolved_code, "未分類"),
-        "收盤": close, "支撐": support, "短期壓力": resistance, "中繼目標": mid_target, "突破目標": final_target,
-        "星級": star, "操作評級": action_label, "結論": conclusion, "交易訊號": signal,
-        "排名分組": bucket, "排名原因": rank_reason(bucket, conclusion, signal),
-        "盤前建議": bias, "突破狀態": breakout_status, "突破強度": breakout_strength, "追價建議": chase,
-        "進場": entry, "停損": stop, "目標": short_target, "風報比": rr, "ATR": atr,
-        "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1), "KDJ_J": round(float(df["j"].iloc[-1]), 1) if pd.notna(df["j"].iloc[-1]) else 50.0,
-        "MACD_DIF": round(float(df["macd_dif"].iloc[-1]), 2) if pd.notna(df["macd_dif"].iloc[-1]) else 0.0,
-        "MACD_DEA": round(float(df["macd_dea"].iloc[-1]), 2) if pd.notna(df["macd_dea"].iloc[-1]) else 0.0,
-        "MACD_BAR": round(float(df["macd_bar"].iloc[-1]), 2) if pd.notna(df["macd_bar"].iloc[-1]) else 0.0,
-        "乖離率5日": round(bias5, 2),
-        "成交量": int(vol), "昨量": int(vol_prev), "量比5日": vol_ratio, "量能變化": vol_trend, "量能變化%": vol_change_pct,
-        "價量結論": pv_label, "價量燈號": pv_light, "價量理由": "｜".join(pv_reasons),
-        **liquidity_info,
-        **inst_info,
-        **build_short_strategy({
-            "收盤": close, "支撐": support, "短期壓力": resistance, "突破目標": final_target, "中繼目標": mid_target,
-            "操作評級": action_label, "結論": conclusion
-        }),
-        "選股理由": reason,
-        "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
-        "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
-        "摘要3": f"量價/流動性/法人：{vol_trend} {vol_change_pct:+.2f}% ｜ {liquidity_info.get("流動性結論", "流動性不足")} ｜ {inst_info.get("法人摘要", "三大法人資料不足")} ｜ 若有效突破短壓，突破後目標空間約 {dist_target}% 。",
-        "_code": resolved_code, "_rank": rank,
+def _candidate_register_failure(raw_stock: str, reason: str):
+    fail_map = st.session_state.setdefault("_candidate_fail_cooldown", {})
+    key = _candidate_fail_key(raw_stock)
+    fail_map[key] = {
+        "reason": str(reason or "資料不足"),
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "until": (datetime.now() + timedelta(minutes=CANDIDATE_FAIL_COOLDOWN_MINUTES)).isoformat(timespec="seconds"),
     }
 
 
-def normalize_snapshot_mode(mode_text: str) -> str:
-    text = str(mode_text or "").strip()
-    if not text:
-        return ""
-    if "空" in text:
-        return "空方"
-    if "多" in text:
-        return "多方"
-    return text
+def analyze_one_cached(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
+    shared = _candidate_stock_cache_get(raw_stock, market_adj)
+    if shared is not None:
+        return shared
+
+    cache = st.session_state.setdefault("_manual_analysis_cache", {})
+    key = (str(raw_stock).strip().upper(), int(market_adj or 0), _analysis_refresh_tag(), APP_VERSION)
+    if key in cache:
+        return cache[key]
+
+    item = analyze_one(raw_stock, market_adj, name_map)
+    if item is not None:
+        cache[key] = item
+        _candidate_stock_cache_set(raw_stock, market_adj, item)
+    if len(cache) > 240:
+        for old_key in list(cache.keys())[:60]:
+            cache.pop(old_key, None)
+    return item
 
 
-def detect_strategy_mode(row: dict) -> str:
-    mode_text = str(row.get("策略模式", "") or row.get("快照邏輯", "") or row.get("模式", ""))
-    rank_group = str(row.get("排名分組", "") or "")
-    normalized = normalize_snapshot_mode(mode_text)
-    if normalized in ["多方", "空方"]:
-        return normalized
-    if "做空" in mode_text or rank_group.startswith("S_"):
-        return "空方"
-    return "多方"
-
-
-def materialize_snapshot_row(row: dict, forced_mode: str | None = None):
-    rec = {k: v for k, v in row.items() if not str(k).startswith("_")}
-    mode = normalize_snapshot_mode(forced_mode) or detect_strategy_mode(rec)
-    rec["快照邏輯"] = mode
-    if mode == "空方":
-        rec["進場"] = rec.get("空方建議進場", rec.get("進場", ""))
-        rec["停損"] = rec.get("空方停損", rec.get("停損", ""))
-        rec["支撐"] = rec.get("空方短期支撐", rec.get("支撐", ""))
-        rec["短期壓力"] = rec.get("空方短期壓力", rec.get("短期壓力", ""))
-        rec["中繼目標"] = rec.get("空方中繼目標", rec.get("中繼目標", ""))
-        rec["突破目標"] = rec.get("空方跌破目標", rec.get("突破目標", ""))
-        rec["風報比"] = rec.get("空方風報比", rec.get("風報比", ""))
-    return rec
-
-
+def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
+    name_map = name_map or load_name_map()
+    item = ce.analyze_one(
+        raw_stock=raw_stock,
+        market_adj=market_adj,
+        name_map=name_map,
+        resolve_symbol=resolve_symbol,
+        indicators=indicators,
+        display_name_func=display_name,
+        stock_sector=stock_sector,
+        liquidity_builder=build_liquidity_profile,
+    )
+    return item
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -3438,6 +3326,82 @@ def analyze_candidate_pool_cached(candidate_pool: tuple, market_adj: int, name_m
             except Exception:
                 continue
     return results
+
+
+def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_map: dict):
+    codes = [str(x).strip() for x in candidate_pool if str(x).strip()]
+    if not codes:
+        return [], {
+            "candidate_count": 0,
+            "cache_hits": 0,
+            "new_success": 0,
+            "new_failures": 0,
+            "cooldown_skips": 0,
+            "cooldown_rows": [],
+            "failure_rows": [],
+        }
+
+    results = []
+    debug = {
+        "candidate_count": len(codes),
+        "cache_hits": 0,
+        "new_success": 0,
+        "new_failures": 0,
+        "cooldown_skips": 0,
+        "cooldown_rows": [],
+        "failure_rows": [],
+    }
+
+    pending_codes = []
+    seen = set()
+    for code in codes:
+        code_u = str(code).strip().upper()
+        if not code_u or code_u in seen:
+            continue
+        seen.add(code_u)
+        cached_item = _candidate_stock_cache_get(code_u, market_adj)
+        if cached_item is not None:
+            results.append(cached_item)
+            debug["cache_hits"] += 1
+            continue
+        active, meta = _candidate_fail_cooldown_active(code_u)
+        if active:
+            debug["cooldown_skips"] += 1
+            debug["cooldown_rows"].append({
+                "股票代碼": code_u,
+                "原因": meta.get("reason", "資料不足"),
+                "冷卻到": meta.get("until", ""),
+            })
+            continue
+        pending_codes.append(code_u)
+
+    if pending_codes:
+        max_workers = min(10, max(4, len(pending_codes) // 24 + 2))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(analyze_one, code, market_adj, name_map): code for code in pending_codes}
+            for fut in as_completed(futures):
+                code_u = futures[fut]
+                try:
+                    item = fut.result()
+                except Exception as e:
+                    reason = f"{type(e).__name__}: {e}"
+                    _candidate_register_failure(code_u, reason)
+                    debug["new_failures"] += 1
+                    debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                    continue
+                if item is None:
+                    reason = "無有效日線或資料天數不足"
+                    _candidate_register_failure(code_u, reason)
+                    debug["new_failures"] += 1
+                    debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                    continue
+                _candidate_stock_cache_set(code_u, market_adj, item)
+                results.append(item)
+                debug["new_success"] += 1
+
+    debug["result_count"] = len(results)
+    return results, debug
+
 
 def save_snapshot(snapshot_type: str, results, forced_mode: str | None = None):
     snaps = load_snapshots()
@@ -4651,7 +4615,7 @@ def render_global_banner():
     )
 
 with st.sidebar:
-    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} TPEx法人欄位解析版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源；這版把法人摘要卡、評級拆解與偵錯面板同步到同一份最終法人資料，解決上面顯示資料不足、下面其實已抓到的不同步問題。</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 候選池分割版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源；這版進入第二階段加速穩定：單股搜尋與候選池分流、逐股快取、失敗冷卻與候選池偵錯摘要，先確認 250 檔的速度與穩定性。</div></div>', unsafe_allow_html=True)
     page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -5120,6 +5084,90 @@ def build_short_auto_reason(item: dict) -> str:
 
 def make_snapshot_batch_id(snapshot_time: str, mode: str = "", count: int = 0) -> str:
     return f"{snapshot_time}|||{mode}|||{count}"
+
+
+def detect_strategy_mode(row: dict) -> str:
+    """根據快照/交易/分析資料推斷這筆資料屬於多方或空方。"""
+    if row is None:
+        return "多方"
+    if isinstance(row, pd.Series):
+        data = row.to_dict()
+    elif isinstance(row, dict):
+        data = row
+    else:
+        try:
+            data = dict(row)
+        except Exception:
+            return "多方"
+
+    direct_keys = ["快照邏輯", "策略模式", "方向", "模式"]
+    for key in direct_keys:
+        val = str(data.get(key, "") or "").strip()
+        if not val:
+            continue
+        if "空" in val:
+            return "空方"
+        if any(x in val for x in ["多", "long", "LONG"]):
+            return "多方"
+
+    for key in ["結論", "盤前建議", "計畫結論", "盤前快照結論", "交易訊號"]:
+        val = str(data.get(key, "") or "").strip()
+        if not val:
+            continue
+        if any(x in val for x in ["看空", "偏空", "空方"]):
+            return "空方"
+        if any(x in val for x in ["看多", "偏多", "多方"]):
+            return "多方"
+
+    for key in ["空方建議進場", "空方停損", "空方短期壓力", "空方短期支撐", "空方中繼目標", "空方跌破目標"]:
+        val = data.get(key, "")
+        if str(val).strip() not in ["", "None", "nan", "NaN"]:
+            return "空方"
+
+    return "多方"
+
+
+def materialize_snapshot_row(row: dict, forced_mode: str | None = None):
+    """
+    將快照/分析結果統一實體化成可直接顯示與比對的欄位。
+    若指定 forced_mode 或偵測為空方，則把進場/停損/支撐/壓力/目標/風報比
+    轉成空方欄位，避免快照中心多空欄位混用。
+    """
+    if row is None:
+        return {}
+    if isinstance(row, pd.Series):
+        rec = row.to_dict()
+    elif isinstance(row, dict):
+        rec = dict(row)
+    else:
+        try:
+            rec = dict(row)
+        except Exception:
+            return {}
+
+    mode_text = str(forced_mode or '').strip()
+    if mode_text:
+        mode = '空方' if '空' in mode_text else '多方'
+    else:
+        mode = detect_strategy_mode(rec)
+    rec['快照邏輯'] = mode
+
+    if mode == '空方':
+        mapping = {
+            '進場': '空方建議進場',
+            '停損': '空方停損',
+            '支撐': '空方短期支撐',
+            '短期壓力': '空方短期壓力',
+            '中繼目標': '空方中繼目標',
+            '突破目標': '空方跌破目標',
+            '風報比': '空方風報比',
+        }
+        for target_key, short_key in mapping.items():
+            val = rec.get(short_key, '')
+            sval = str(val).strip() if val is not None else ''
+            if sval not in ['', 'None', 'nan', 'NaN']:
+                rec[target_key] = val
+    return rec
 
 
 def grouped_prefast_snapshots():
@@ -6178,7 +6226,7 @@ if st.session_state.current_page == "分析中心":
     if manual_search:
         tmp = []
         for stock in [s.strip() for s in stocks.split(",") if s.strip()]:
-            item = analyze_one(stock, market_info["score_adj"], name_map)
+            item = analyze_one_cached(stock, market_info["score_adj"], name_map)
             if item is not None:
                 item["策略模式"] = "手動分析"
                 tmp.append(item)
@@ -6192,14 +6240,8 @@ if st.session_state.current_page == "分析中心":
         with st.spinner("正在建立 250 檔候選池並執行自動挑股，請稍候..."):
             active_candidate_pool = build_candidate_pool_250(name_map, max_price=1100.0, target_count=250)
             st.session_state.last_candidate_pool = active_candidate_pool
-            pool_key = (tuple(active_candidate_pool), int(market_info["score_adj"]), APP_VERSION)
-            cached_entry = st.session_state.get("_candidate_analysis_cache", {})
-            raw_candidates = cached_entry.get(pool_key) if isinstance(cached_entry, dict) else None
-            if raw_candidates is None:
-                raw_candidates = analyze_candidate_pool_cached(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
-                if not isinstance(st.session_state.get("_candidate_analysis_cache"), dict):
-                    st.session_state["_candidate_analysis_cache"] = {}
-                st.session_state["_candidate_analysis_cache"][pool_key] = raw_candidates
+            raw_candidates, engine_debug = analyze_candidate_pool_session(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
+            st.session_state.last_candidate_engine_summary = engine_debug
 
         liquidity_passed = [x for x in raw_candidates if liquidity_pass(x)]
         liquidity_filtered = [x for x in raw_candidates if not liquidity_pass(x)]
@@ -6207,12 +6249,53 @@ if st.session_state.current_page == "分析中心":
             "raw_count": len(raw_candidates),
             "passed_count": len(liquidity_passed),
             "filtered_count": len(liquidity_filtered),
-            "top_reasons": [f"{x.get('股票','')}｜{liquidity_penalty_reason(x)}" for x in liquidity_filtered[:5]],
+            "top_reasons": [f"{x.get('股票','')}｜{liquidity_penalty_reason(x)}" for x in liquidity_filtered[:10]],
+            "missing_liq_count": sum(1 for x in raw_candidates if "流動性達標" not in x),
+            "debug_rows": [
+                {
+                    "股票": x.get("股票", x.get("_code", "")),
+                    "流動性達標": x.get("流動性達標", "<缺漏>"),
+                    "流動性結論": x.get("流動性結論", "<缺漏>"),
+                    "流動性摘要": x.get("流動性摘要", "<缺漏>"),
+                    "流動性排除原因": x.get("流動性排除原因", "<缺漏>"),
+                }
+                for x in raw_candidates[:20]
+            ],
         }
         source_candidates = liquidity_passed
 
         if not source_candidates:
             st.warning("本次候選池全部被盤前流動性門檻排除，請放寬條件或改用手動搜尋。")
+            liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
+            with st.expander("查看盤前流動性排除偵錯", expanded=True):
+                dm1, dm2, dm3 = st.columns(3)
+                dm1.metric("候選池分析數", liq_summary.get("raw_count", 0))
+                dm2.metric("通過流動性門檻", liq_summary.get("passed_count", 0))
+                dm3.metric("缺漏流動性欄位", liq_summary.get("missing_liq_count", 0))
+                reasons = liq_summary.get("top_reasons", [])
+                if reasons:
+                    st.caption("前幾個排除原因：")
+                    for r in reasons:
+                        st.write(f"- {r}")
+                debug_rows = liq_summary.get("debug_rows", [])
+                if debug_rows:
+                    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
+
+            engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
+            with st.expander("查看候選池引擎偵錯摘要", expanded=False):
+                em1, em2, em3, em4 = st.columns(4)
+                em1.metric("候選池總數", engine_summary.get("candidate_count", 0))
+                em2.metric("逐股快取命中", engine_summary.get("cache_hits", 0))
+                em3.metric("本輪新增成功", engine_summary.get("new_success", 0))
+                em4.metric("冷卻 / 失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
+                cooldown_rows = engine_summary.get("cooldown_rows", [])
+                failure_rows = engine_summary.get("failure_rows", [])
+                if cooldown_rows:
+                    st.caption("冷卻跳過：")
+                    st.dataframe(pd.DataFrame(cooldown_rows), use_container_width=True, hide_index=True)
+                if failure_rows:
+                    st.caption("本輪失敗：")
+                    st.dataframe(pd.DataFrame(failure_rows), use_container_width=True, hide_index=True)
 
         if auto_pick_mode == "嚴格模式":
             candidates = []
@@ -6267,9 +6350,9 @@ if st.session_state.current_page == "分析中心":
         st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
     else:
         if st.session_state.analysis_mode == "manual":
-            st.caption("目前模式：手動搜尋")
+            st.caption("目前模式：手動搜尋｜單股搜尋走獨立路徑，不會重跑 250 檔候選池；若該檔已在候選池分析過，會直接重用逐股快取。")
         elif st.session_state.analysis_mode == "auto":
-            st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池分析會優先重用快取，首輪完成後再次切模式或重跑會更快。")
+            st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池分析改成逐股快取＋失敗冷卻；首輪完成後再次切模式或重跑只重排、不重抓的比例會更高。")
             if auto_pick_mode == "嚴格模式" and len(results) < top_n:
                 st.info(f"嚴格模式本次僅通過 {len(results)} 檔，未補滿 {top_n} 檔；系統不會自動用較鬆條件補齊，以避免混入品質較弱標的。")
         elif st.session_state.analysis_mode == "favorites":
@@ -6846,7 +6929,7 @@ if st.session_state.current_page == "市場儀表板":
         st.caption("正式版原則：先維持主流程穩定，再逐步優化官方資料直連；SSL 直連問題目前列為後續技術債，不阻擋主專案開發。")
 
 if st.session_state.current_page == "持倉中心":
-    st.markdown('<div class="main-shell"><h3>💼 持倉中心</h3><p>正式版持倉追蹤區：不是只看損益，而是把你的實際成本、交易紀錄、原始計畫與快照驗證放在同一頁。</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-shell"><h3>💼 持倉中心</h3><p>正式版持倉追蹤區：先看你的持倉判讀、危險區與出場位置；交易紀錄與快照驗證改放到頁面下方附加區，不再擋住主閱讀動線。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
 
     if st.session_state.get("position_stock_pending"):
@@ -6876,88 +6959,7 @@ if st.session_state.current_page == "持倉中心":
         else:
             st.info("目前分析中心尚未選定股票。")
 
-    st.info("V149 維持持倉與交易回顧整合；這版正式補上 TPEx 法人主頁 / OpenAPI 來源，並把法人股數顯示統一改成張。")
-
-    render_section_divider("交易紀錄與快照驗證", "把你的買賣紀錄、原始計畫、盤前快照與盤後驗證綁在一起，不再只有分析沒有回顧。")
-    default_trade_stock = str(st.session_state.get("position_stock_input", "") or "").strip()
-    tc1, tc2, tc3, tc4, tc5, tc6 = st.columns([1.5, 1.0, 1.0, 1.1, 1.1, 1.3] if not st.session_state.mobile_mode else [1,1,1,1,1,1])
-    with tc1:
-        trade_stock = st.text_input("交易股票", value=default_trade_stock, key="trade_stock_input", placeholder="例如：2330、1815")
-    with tc2:
-        trade_side = st.selectbox("方向", ["做多", "做空"], index=0, key="trade_side")
-    with tc3:
-        trade_action_options = ["買進", "賣出"] if trade_side == "做多" else ["賣出", "買進"]
-        trade_action = st.selectbox("動作", trade_action_options, index=0, key="trade_action")
-    with tc4:
-        trade_price = st.number_input("成交價", min_value=0.0, value=float(st.session_state.get("position_entry", 0.0) or 0.0), step=0.1, format="%.2f", key="trade_price")
-    with tc5:
-        trade_qty = st.number_input("數量", min_value=1, value=int(st.session_state.get("position_shares", 1000) or 1000), step=1000, key="trade_qty")
-    with tc6:
-        trade_note = st.text_input("備註", key="trade_note", placeholder="可留空")
-
-    tb1, tb2 = st.columns([1.2, 1.8])
-    save_trade_now = tb1.button("記錄交易", use_container_width=True, key="save_trade_now")
-    if tb2.button("帶入目前持倉欄位", use_container_width=True, key="fill_trade_from_position"):
-        st.session_state.trade_stock_input = str(st.session_state.get("position_stock_input", "") or "")
-        st.session_state.trade_side = st.session_state.get("position_side", "做多")
-        st.session_state.trade_price = float(st.session_state.get("position_entry", 0.0) or 0.0)
-        st.session_state.trade_qty = int(st.session_state.get("position_shares", 1000) or 1000)
-        st.rerun()
-
-    if save_trade_now:
-        if not str(trade_stock).strip():
-            st.warning("請先輸入交易股票。")
-        elif float(trade_price or 0) <= 0:
-            st.warning("請先輸入有效成交價。")
-        else:
-            trade_code, _ = resolve_symbol(str(trade_stock).strip())
-            trade_context = build_trade_context(str(trade_stock).strip(), trade_side, name_map)
-            trades = load_trades()
-            trades.append({
-                "時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "股票": trade_code or str(trade_stock).strip().upper(),
-                "方向": normalize_trade_side(trade_side),
-                "動作": trade_action,
-                "價格": float(trade_price),
-                "數量": int(trade_qty),
-                "備註": str(trade_note or ""),
-                "剩餘數量": int(trade_qty) if ((normalize_trade_side(trade_side) == "做多" and trade_action == "買進") or (normalize_trade_side(trade_side) == "做空" and trade_action == "賣出")) else 0,
-                **trade_context
-            })
-            save_trades(trades)
-            st.success(f"已記錄 {trade_code or trade_stock}｜{trade_side}｜{trade_action}。")
-            st.rerun()
-
-    trades_all = load_trades()
-    closed_df, open_df = pair_trades(trades_all)
-    total_pnl, total_count, total_win_rate, total_avg_ret = summary_stats(closed_df if isinstance(closed_df, pd.DataFrame) else pd.DataFrame())
-    trade_side_stats = signal_stats(closed_df if isinstance(closed_df, pd.DataFrame) else pd.DataFrame())
-
-    sm1, sm2, sm3, sm4 = st.columns(4)
-    sm1.metric("已完成交易", total_count)
-    sm2.metric("累計已實現損益", f"{total_pnl:,.0f} 元")
-    sm3.metric("整體勝率", f"{total_win_rate:.2f}%")
-    sm4.metric("平均報酬率", f"{total_avg_ret:.2f}%")
-
-    if trade_side_stats is not None and not trade_side_stats.empty:
-        stat_cards = st.columns(len(trade_side_stats))
-        for col, rec in zip(stat_cards, trade_side_stats.to_dict(orient="records")):
-            with col:
-                with st.container(border=True):
-                    st.markdown(f"#### {rec.get('方向','--')}")
-                    st.write(f"完成筆數：**{rec.get('完成筆數', 0)}**")
-                    st.write(f"累計損益：**{rec.get('累計損益', 0):,.0f} 元**")
-                    st.write(f"勝率：**{rec.get('勝率%', 0):.2f}%**")
-                    st.write(f"平均報酬：**{rec.get('平均報酬率%', 0):.2f}%**")
-
-    if isinstance(open_df, pd.DataFrame) and not open_df.empty:
-        with st.expander("未平倉部位總覽", expanded=False):
-            show_cols = [c for c in ["股票", "方向", "開倉時間", "開倉價", "剩餘數量", "計畫結論", "計畫訊號", "法人方向", "盤前快照時間"] if c in open_df.columns]
-            st.dataframe(open_df[show_cols], use_container_width=True, hide_index=True)
-    if isinstance(closed_df, pd.DataFrame) and not closed_df.empty:
-        with st.expander("已完成交易回顧", expanded=False):
-            show_cols = [c for c in ["股票", "方向", "開倉時間", "平倉時間", "開倉價", "平倉價", "數量", "損益", "報酬率%", "計畫結論", "計畫訊號", "法人方向", "盤前快照時間", "盤後快照時間"] if c in closed_df.columns]
-            st.dataframe(closed_df.sort_values("平倉時間", ascending=False)[show_cols], use_container_width=True, hide_index=True)
+    st.info("V158 持倉中心主流程改成先看現況對照，再看原始計畫；技術與結構改成預設收合，避免中段資訊過長影響出場判讀。")
 
 
     if calc_position:
@@ -7004,7 +7006,20 @@ if st.session_state.current_page == "持倉中心":
         ]
         render_position_status_chips(chips)
 
-        render_section_divider("原始計畫", "先看原始規劃，再看你的實際成本有沒有偏離。")
+        render_section_divider("現況對照", "先直接看現在離停損、壓力、中繼、突破各還有多少空間，這是持倉中心最優先資訊。")
+        lv1, lv2, lv3, lv4 = st.columns(4)
+        lv1.metric("到停損剩餘", (f"{tracking.get('to_stop_pct'):.2f}%" if tracking.get("to_stop_pct") is not None else "--"))
+        lv2.metric("到短壓空間", (f"{tracking.get('to_resistance_pct'):.2f}%" if tracking.get("to_resistance_pct") is not None else "--"))
+        lv3.metric("到中繼空間", (f"{tracking.get('to_mid_pct'):.2f}%" if tracking.get("to_mid_pct") is not None else "--"))
+        lv4.metric("到突破空間", (f"{tracking.get('to_breakout_pct'):.2f}%" if tracking.get("to_breakout_pct") is not None else "--"))
+
+        lv5, lv6, lv7, lv8 = st.columns(4)
+        lv5.metric("停損", fmt_price_with_unit(plan.get("stop")))
+        lv6.metric("短期壓力", fmt_price_with_unit(plan.get("resistance")))
+        lv7.metric("第一目標", fmt_price_with_unit(plan.get("target1")))
+        lv8.metric("第二目標", fmt_price_with_unit(plan.get("target2")))
+
+        render_section_divider("原始計畫", "再回頭看原始規劃，確認這筆持倉最初的進出場設計。")
         p1, p2, p3, p4 = st.columns(4)
         p1.metric("原始進場", fmt_price_with_unit(tracking.get("plan_entry")))
         p2.metric("原始停損", fmt_price_with_unit(tracking.get("plan_stop")))
@@ -7032,37 +7047,25 @@ if st.session_state.current_page == "持倉中心":
                 st.write(f"系統目前建議：**{plan.get('action', '--')}**")
                 st.write(f"原因：{plan.get('reason', '--')}")
 
-        render_section_divider("現況對照", "直接看現在離停損、壓力、中繼、突破各還有多少空間。")
-        lv1, lv2, lv3, lv4 = st.columns(4)
-        lv1.metric("到停損剩餘", (f"{tracking.get('to_stop_pct'):.2f}%" if tracking.get("to_stop_pct") is not None else "--"))
-        lv2.metric("到短壓空間", (f"{tracking.get('to_resistance_pct'):.2f}%" if tracking.get("to_resistance_pct") is not None else "--"))
-        lv3.metric("到中繼空間", (f"{tracking.get('to_mid_pct'):.2f}%" if tracking.get("to_mid_pct") is not None else "--"))
-        lv4.metric("到突破空間", (f"{tracking.get('to_breakout_pct'):.2f}%" if tracking.get("to_breakout_pct") is not None else "--"))
+        with st.expander("技術與結構", expanded=False):
+            st.caption("正式版欄位順序同步：收盤 → 進場 → 停損 → 壓力 → 目標 → 風報比 → 結論 → 交易訊號。")
+            core1, core2, core3, core4 = st.columns(4)
+            core1.metric("收盤", fmt_price_with_unit(row.get("收盤")))
+            core2.metric("進場", fmt_price_with_unit(tracking.get("plan_entry")))
+            core3.metric("停損", fmt_price_with_unit(tracking.get("plan_stop")))
+            core4.metric("短期壓力", fmt_price_with_unit(tracking.get("plan_resistance")))
+            core5, core6, core7, core8 = st.columns(4)
+            core5.metric("中繼目標", fmt_price_with_unit(tracking.get("plan_mid_target")))
+            core6.metric("突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
+            core7.metric("風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
+            core8.metric("結論 / 訊號", f"{tracking.get('plan_conclusion', '--')} / {tracking.get('plan_signal', '--')}")
 
-        lv5, lv6, lv7, lv8 = st.columns(4)
-        lv5.metric("停損", fmt_price_with_unit(plan.get("stop")))
-        lv6.metric("短期壓力", fmt_price_with_unit(plan.get("resistance")))
-        lv7.metric("第一目標", fmt_price_with_unit(plan.get("target1")))
-        lv8.metric("第二目標", fmt_price_with_unit(plan.get("target2")))
-
-        render_section_divider("技術與結構", "正式版欄位順序同步：收盤 → 進場 → 停損 → 壓力 → 目標 → 風報比 → 結論 → 交易訊號。")
-        core1, core2, core3, core4 = st.columns(4)
-        core1.metric("收盤", fmt_price_with_unit(row.get("收盤")))
-        core2.metric("進場", fmt_price_with_unit(tracking.get("plan_entry")))
-        core3.metric("停損", fmt_price_with_unit(tracking.get("plan_stop")))
-        core4.metric("短期壓力", fmt_price_with_unit(tracking.get("plan_resistance")))
-        core5, core6, core7, core8 = st.columns(4)
-        core5.metric("中繼目標", fmt_price_with_unit(tracking.get("plan_mid_target")))
-        core6.metric("突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
-        core7.metric("風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
-        core8.metric("結論 / 訊號", f"{tracking.get('plan_conclusion', '--')} / {tracking.get('plan_signal', '--')}")
-
-        rv1, rv2, rv3, rv4, rv5 = st.columns(5)
-        rv1.metric("KDJ判讀", kdj_signal(row))
-        rv2.metric("MACD判讀", macd_signal(row))
-        rv3.metric("量能變化", fmt_text(row.get("量能變化", "")) or "--")
-        rv4.metric("突破狀態", fmt_text(row.get("突破狀態", "")) or "--")
-        rv5.metric("官方最新日資料", fmt_text(row.get("TWSE來源", "")) or "未命中")
+            rv1, rv2, rv3, rv4, rv5 = st.columns(5)
+            rv1.metric("KDJ判讀", kdj_signal(row))
+            rv2.metric("MACD判讀", macd_signal(row))
+            rv3.metric("量能變化", fmt_text(row.get("量能變化", "")) or "--")
+            rv4.metric("突破狀態", fmt_text(row.get("突破狀態", "")) or "--")
+            rv5.metric("官方最新日資料", fmt_text(row.get("TWSE來源", "")) or "未命中")
 
         lower_cols = st.columns(2) if not st.session_state.mobile_mode else None
         if lower_cols is None:
@@ -7109,6 +7112,90 @@ if st.session_state.current_page == "持倉中心":
             if str(row.get("TWSE命中", "")) == "是":
                 st.caption(f"官方最新日資料：日期 {fmt_text(row.get('TWSE日期', '')) or '--'}；收盤 {fmt_price_with_unit(row.get('TWSE收盤', ''))}；成交量 {fmt_lots(row.get('TWSE成交量', ''))}；成交值 {fmt_trade_value_yi(row.get('TWSE成交值', ''))}。")
 
+
+
+    render_section_divider("交易紀錄與快照驗證（附加區）", "這兩塊保留，但改移到最下面並預設收合；先看持倉判讀，需要時再展開回顧。")
+    with st.expander("展開交易紀錄與快照驗證", expanded=False):
+        st.caption("這裡放你的交易回顧、未平倉部位與快照驗證，不再擋在持倉判讀中間。")
+        default_trade_stock = str(st.session_state.get("position_stock_input", "") or "").strip()
+        tc1, tc2, tc3, tc4, tc5, tc6 = st.columns([1.5, 1.0, 1.0, 1.1, 1.1, 1.3] if not st.session_state.mobile_mode else [1,1,1,1,1,1])
+        with tc1:
+            trade_stock = st.text_input("交易股票", value=default_trade_stock, key="trade_stock_input", placeholder="例如：2330、1815")
+        with tc2:
+            trade_side = st.selectbox("方向", ["做多", "做空"], index=0, key="trade_side")
+        with tc3:
+            trade_action_options = ["買進", "賣出"] if trade_side == "做多" else ["賣出", "買進"]
+            trade_action = st.selectbox("動作", trade_action_options, index=0, key="trade_action")
+        with tc4:
+            trade_price = st.number_input("成交價", min_value=0.0, value=float(st.session_state.get("position_entry", 0.0) or 0.0), step=0.1, format="%.2f", key="trade_price")
+        with tc5:
+            trade_qty = st.number_input("數量", min_value=1, value=int(st.session_state.get("position_shares", 1000) or 1000), step=1000, key="trade_qty")
+        with tc6:
+            trade_note = st.text_input("備註", key="trade_note", placeholder="可留空")
+
+        tb1, tb2 = st.columns([1.2, 1.8])
+        save_trade_now = tb1.button("記錄交易", use_container_width=True, key="save_trade_now")
+        if tb2.button("帶入目前持倉欄位", use_container_width=True, key="fill_trade_from_position"):
+            st.session_state.trade_stock_input = str(st.session_state.get("position_stock_input", "") or "")
+            st.session_state.trade_side = st.session_state.get("position_side", "做多")
+            st.session_state.trade_price = float(st.session_state.get("position_entry", 0.0) or 0.0)
+            st.session_state.trade_qty = int(st.session_state.get("position_shares", 1000) or 1000)
+            st.rerun()
+
+        if save_trade_now:
+            if not str(trade_stock).strip():
+                st.warning("請先輸入交易股票。")
+            elif float(trade_price or 0) <= 0:
+                st.warning("請先輸入有效成交價。")
+            else:
+                trade_code, _ = resolve_symbol(str(trade_stock).strip())
+                trade_context = build_trade_context(str(trade_stock).strip(), trade_side, name_map)
+                trades = load_trades()
+                trades.append({
+                    "時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "股票": trade_code or str(trade_stock).strip().upper(),
+                    "方向": normalize_trade_side(trade_side),
+                    "動作": trade_action,
+                    "價格": float(trade_price),
+                    "數量": int(trade_qty),
+                    "備註": str(trade_note or ""),
+                    "剩餘數量": int(trade_qty) if ((normalize_trade_side(trade_side) == "做多" and trade_action == "買進") or (normalize_trade_side(trade_side) == "做空" and trade_action == "賣出")) else 0,
+                    **trade_context
+                })
+                save_trades(trades)
+                st.success(f"已記錄 {trade_code or trade_stock}｜{trade_side}｜{trade_action}。")
+                st.rerun()
+
+        trades_all = load_trades()
+        closed_df, open_df = pair_trades(trades_all)
+        total_pnl, total_count, total_win_rate, total_avg_ret = summary_stats(closed_df if isinstance(closed_df, pd.DataFrame) else pd.DataFrame())
+        trade_side_stats = signal_stats(closed_df if isinstance(closed_df, pd.DataFrame) else pd.DataFrame())
+
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("已完成交易", total_count)
+        sm2.metric("累計已實現損益", f"{total_pnl:,.0f} 元")
+        sm3.metric("整體勝率", f"{total_win_rate:.2f}%")
+        sm4.metric("平均報酬率", f"{total_avg_ret:.2f}%")
+
+        if trade_side_stats is not None and not trade_side_stats.empty:
+            stat_cards = st.columns(len(trade_side_stats))
+            for col, rec in zip(stat_cards, trade_side_stats.to_dict(orient="records")):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f"#### {rec.get('方向','--')}")
+                        st.write(f"完成筆數：**{rec.get('完成筆數', 0)}**")
+                        st.write(f"累計損益：**{rec.get('累計損益', 0):,.0f} 元**")
+                        st.write(f"勝率：**{rec.get('勝率%', 0):.2f}%**")
+                        st.write(f"平均報酬：**{rec.get('平均報酬率%', 0):.2f}%**")
+
+        if isinstance(open_df, pd.DataFrame) and not open_df.empty:
+            with st.expander("未平倉部位總覽", expanded=False):
+                show_cols = [c for c in ["股票", "方向", "開倉時間", "開倉價", "剩餘數量", "計畫結論", "計畫訊號", "法人方向", "盤前快照時間"] if c in open_df.columns]
+                st.dataframe(open_df[show_cols], use_container_width=True, hide_index=True)
+        if isinstance(closed_df, pd.DataFrame) and not closed_df.empty:
+            with st.expander("已完成交易回顧", expanded=False):
+                show_cols = [c for c in ["股票", "方向", "開倉時間", "平倉時間", "開倉價", "平倉價", "數量", "損益", "報酬率%", "計畫結論", "計畫訊號", "法人方向", "盤前快照時間", "盤後快照時間"] if c in closed_df.columns]
+                st.dataframe(closed_df.sort_values("平倉時間", ascending=False)[show_cols], use_container_width=True, hide_index=True)
 
 if st.session_state.current_page == "快照中心":
     st.markdown('<div class="main-shell"><h3>🕘 快照中心</h3><p>正式版快照工作區：保留快照中心三層閱讀架構，這版把盤前快照、盤後對照與驗證摘要串起來，不再只是看差異表。</p></div>', unsafe_allow_html=True)
