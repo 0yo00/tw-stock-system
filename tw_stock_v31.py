@@ -29,9 +29,9 @@ except Exception:
     pass
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-APP_VERSION = "V170"
+APP_VERSION = "V178"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "資料源分流加速版：候選池改成靜態清單，不再自動官方補資料；單股詳細分析改成延後載入法人與圖表，優先修正手動搜尋與切股過慢問題。"
+APP_VERSION_NOTE = "空方總表當沖化修正版：空方建議進場／停損／短期壓力／中繼目標全面限制在次日可交易邊界內；一般模式與嚴格模式也收斂成多方當沖優先。"
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
@@ -880,6 +880,23 @@ def _official_latest_row_for_symbol(symbol: str):
     if isinstance(row, pd.DataFrame):
         row = row.iloc[-1]
     return row
+
+
+def _official_latest_ohlc_map(symbol: str):
+    row = _official_latest_row_for_symbol(symbol)
+    if row is None:
+        return {"hit": False, "date": "", "source": "", "close": "", "high": "", "low": "", "open": "", "volume": ""}
+    date_str = _roc_to_ad(row.get("date", ""))
+    return {
+        "hit": True,
+        "date": date_str,
+        "source": str(row.get("source", "") or "official"),
+        "open": _to_number_or_none(row.get("open")),
+        "high": _to_number_or_none(row.get("high")),
+        "low": _to_number_or_none(row.get("low")),
+        "close": _to_number_or_none(row.get("close")),
+        "volume": _to_number_or_none(row.get("volume")),
+    }
 
 
 def _apply_official_latest_bar(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -3177,8 +3194,10 @@ def render_compare_status_cards(detail_row: dict, title: str = "對照摘要"):
 
 def build_short_strategy(row: dict):
     """
-    空方正式版：獨立輸出空方壓力 / 支撐 / 進場 / 停損 / 中繼目標 / 跌破目標
-    以現有結構欄位推導，不與做多欄位混寫。
+    V178：空方總表當沖化
+    - 空方短期壓力 / 建議進場 / 停損 / 中繼目標 / 跌破目標
+      全部限制在以收盤為基準的次日可交易邊界內
+    - 不再讓空方總表跑出明顯超過日內 10% 的波段型數值
     """
     try:
         close = float(row.get("收盤", 0) or 0)
@@ -3196,44 +3215,69 @@ def build_short_strategy(row: dict):
             "空方跌破目標": ""
         }
 
-    # 空方壓力：優先用短期壓力，若過近則用收盤與壓力中間值作反彈空區
-    short_resistance = resistance if resistance > 0 else close
-    short_support = support if support > 0 else close
+    if close <= 0:
+        return {
+            "空方短期壓力": "",
+            "空方短期支撐": "",
+            "空方建議進場": "",
+            "空方停損": "",
+            "空方中繼目標": "",
+            "空方跌破目標": ""
+        }
 
-    # 空方進場：若原本結論/評級偏空，優先靠近收盤或反彈壓力區
-    if str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空":
-        # 若收盤已接近壓力下方，直接用收盤；否則用壓力回彈區
-        if short_resistance > 0 and close > 0 and abs(short_resistance - close) / max(close, 1) <= 0.03:
-            short_entry = close
-        else:
-            short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
-    else:
-        short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+    upper_limit = round(close * 1.10, 2)
+    lower_limit = round(max(close * 0.90, 0.01), 2)
 
-    # 空方停損：放在空方壓力上方；若已有突破目標，取較高者
-    short_stop = max(short_resistance * 1.02, breakout if breakout > 0 else 0)
-    short_stop = round(short_stop, 2) if short_stop > 0 else ""
+    def _clamp(value, low, high):
+        try:
+            return max(low, min(float(value), high))
+        except Exception:
+            return low
 
-    # 空方中繼目標：先看原支撐
-    short_mid = round(short_support, 2) if short_support > 0 else ""
+    # 空方短期壓力：至少高於收盤，且不得超過次日上緣
+    raw_resistance = resistance if resistance > 0 else close * 1.02
+    if raw_resistance <= close:
+        raw_resistance = close * 1.02
+    short_resistance = _clamp(raw_resistance, close, upper_limit)
 
-    # 空方跌破目標：用壓力到支撐的等幅下推
-    if short_resistance > 0 and short_support > 0:
-        width = short_resistance - short_support
-        short_break = round(max(0.0, short_support - width), 2)
-    else:
-        short_break = ""
+    # 空方短期支撐：至少低於收盤，且不得跌破次日下緣
+    raw_support = support if support > 0 else close * 0.98
+    if raw_support >= close:
+        raw_support = close * 0.98
+    short_support = _clamp(raw_support, lower_limit, close)
+
+    bounce_span = max(short_resistance - close, max(close * 0.01, 0.2))
+
+    # 空方建議進場：靠近壓力，不再用偏波段的寬中段
+    short_entry = close + bounce_span * 0.72
+    short_entry = _clamp(short_entry, close, short_resistance)
+
+    # 空方停損：壓力上方極小緩衝，且硬限制在漲停邊界內
+    short_stop = max(short_resistance * 1.004, short_entry * 1.008, short_resistance + max(close * 0.002, 0.2))
+    short_stop = _clamp(short_stop, short_entry, upper_limit)
+
+    # 空方中繼目標：優先原支撐；若原支撐太遠，壓回到日內合理區
+    short_mid = min(short_support, short_entry - max(close * 0.015, bounce_span * 0.55))
+    short_mid = _clamp(short_mid, lower_limit, short_entry)
+
+    # 空方跌破目標：在中繼目標下方再留一段，但不得跌破跌停邊界
+    short_break = short_mid - max(close * 0.012, bounce_span * 0.45)
+    short_break = _clamp(short_break, lower_limit, short_mid)
+
+    # 原本波段結構位只保留作為約束，不再直接決定當沖停損 / 目標
+    if breakout > 0:
+        short_stop = min(short_stop, _clamp(breakout, short_entry, upper_limit))
+    if mid > 0:
+        short_mid = min(short_mid, _clamp(mid, lower_limit, short_entry))
 
     return {
-        "空方短期壓力": round(short_resistance, 2) if short_resistance > 0 else "",
-        "空方短期支撐": round(short_support, 2) if short_support > 0 else "",
-        "空方建議進場": round(short_entry, 2) if short_entry > 0 else "",
-        "空方停損": short_stop,
-        "空方中繼目標": short_mid,
-        "空方跌破目標": short_break
+        "空方短期壓力": round(short_resistance, 2),
+        "空方短期支撐": round(short_support, 2),
+        "空方建議進場": round(short_entry, 2),
+        "空方停損": round(short_stop, 2),
+        "空方中繼目標": round(short_mid, 2),
+        "空方跌破目標": round(short_break, 2)
     }
-
-
 
 def build_liquidity_profile(df: pd.DataFrame) -> dict:
     if df is None or df.empty:
@@ -4805,7 +4849,7 @@ def render_global_banner():
     )
 
 with st.sidebar:
-    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 資料源分流版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線；這版把候選池來源改成靜態清單，分析中心不再自動做官方補資料，單股詳細分析改成延後載入法人與圖表，優先處理手動搜尋與切股過慢問題。</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 當沖優先版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線；持倉中心改成當沖優先判讀，當實際虧損超過警戒門檻時，直接以部位風控優先，不再讓技術位置判讀淡化風險。</div></div>', unsafe_allow_html=True)
     page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -4983,6 +5027,84 @@ def render_market_dashboard(results: list[dict]):
     with st.expander("短線雷達預覽", expanded=False):
         st.dataframe(radar_df, use_container_width=True, hide_index=True)
         st.caption("這裡先做成系統內部的短線雷達雛形；之後可依你提供的版面，再擴充突破區間、均線多頭、量價齊揚等條件。")
+
+def _intraday_long_metrics(item: dict) -> dict:
+    entry = _safe_float(item.get("進場"))
+    stop = _safe_float(item.get("停損"))
+    target = _safe_float(item.get("中繼目標")) or _safe_float(item.get("目標")) or _safe_float(item.get("短期壓力"))
+    resistance = _safe_float(item.get("短期壓力"))
+    risk_pct = None
+    target_pct = None
+    resistance_pct = None
+    if entry and stop is not None and entry > 0:
+        risk_pct = (entry - stop) / entry * 100
+    if entry and target is not None and entry > 0:
+        target_pct = (target - entry) / entry * 100
+    if entry and resistance is not None and entry > 0:
+        resistance_pct = (resistance - entry) / entry * 100
+    return {
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "resistance": resistance,
+        "risk_pct": risk_pct,
+        "target_pct": target_pct,
+        "resistance_pct": resistance_pct,
+    }
+
+
+def is_intraday_long_candidate(item: dict, strict: bool = False) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("排名分組") == "D_後段排除":
+        return False
+    if item.get("交易訊號") == "❌不進":
+        return False
+    if item.get("操作評級") in ["避開", "空方"]:
+        return False
+    if item.get("結論") not in ["看多", "中性偏多"]:
+        return False
+    if item.get("盤前建議") not in ["偏多（可進場）", "中性（等待確認）"]:
+        return False
+    if item.get("突破狀態") == "假突破風險":
+        return False
+
+    metrics = _intraday_long_metrics(item)
+    risk_pct = metrics.get("risk_pct")
+    target_pct = metrics.get("target_pct")
+    entry = metrics.get("entry")
+    stop = metrics.get("stop")
+    target = metrics.get("target")
+
+    if entry is None or stop is None or target is None:
+        return False
+    if risk_pct is None or target_pct is None:
+        return False
+    if risk_pct <= 0 or target_pct <= 0:
+        return False
+    if risk_pct > 5.0:
+        return False
+    if target_pct > 10.2:
+        return False
+
+    rr = float(item.get("風報比", 0) or 0)
+    if strict:
+        if rr < 1.2:
+            return False
+        if item.get("交易訊號") not in ["🔥進場", "👀觀察"]:
+            return False
+        if item.get("法人方向") in ["偏空", "小偏空"]:
+            return False
+        if float(item.get("量比5日", 0) or 0) < 1.0:
+            return False
+    else:
+        if rr < 0.8:
+            return False
+        if item.get("法人方向") == "偏空":
+            return False
+
+    return True
+
 
 def auto_pick_general_score(item: dict) -> float:
     score = 0.0
@@ -5408,23 +5530,30 @@ def delete_selected_from_pre_snapshot(snapshot_time: str, selected_stocks: list[
 
 def get_latest_ohlc_for_compare(symbol_code: str):
     try:
-        df = download_symbol(symbol_code)
-        if df is None or df.empty:
-            return {"close": "", "high": "", "low": ""}
-        last = df.iloc[-1]
-        return {
-            "close": float(last.get("Close", "")) if str(last.get("Close", "")) != "" else "",
-            "high": float(last.get("High", "")) if str(last.get("High", "")) != "" else "",
-            "low": float(last.get("Low", "")) if str(last.get("Low", "")) != "" else "",
-        }
+        official = _official_latest_ohlc_map(symbol_code)
+        if official.get("hit") and official.get("close") is not None:
+            return {
+                "close": official.get("close", ""),
+                "high": official.get("high") if official.get("high") is not None else official.get("close", ""),
+                "low": official.get("low") if official.get("low") is not None else official.get("close", ""),
+                "date": official.get("date", ""),
+                "source": official.get("source", "official"),
+                "official_hit": True,
+            }
+        return {"close": "", "high": "", "low": "", "date": "", "source": "", "official_hit": False}
     except Exception:
-        return {"close": "", "high": "", "low": ""}
+        return {"close": "", "high": "", "low": "", "date": "", "source": "", "official_hit": False}
 
 def get_latest_daily_bar_date(symbol_code: str):
     """
-    取日線最後一筆日期，作為正式盤後資料是否已生成的判斷基準。
+    取最新官方日資料日期；若官方不存在，再退回日線最後一筆日期。
     """
     try:
+        official = _official_latest_ohlc_map(symbol_code)
+        if official.get("hit") and official.get("date"):
+            dt = pd.to_datetime(official.get("date"), errors="coerce")
+            if pd.notna(dt):
+                return dt.date()
         df = download_symbol(symbol_code)
         if df is None or df.empty:
             return None
@@ -5731,9 +5860,52 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot
         pre_stop = pre.get("停損", "")
 
         ohlc_info = get_latest_ohlc_for_compare(code)
-        post_close = ohlc_info.get("close", now_item.get("收盤", ""))
-        post_high = ohlc_info.get("high", now_item.get("收盤", ""))
-        post_low = ohlc_info.get("low", now_item.get("收盤", ""))
+        post_close = ohlc_info.get("close", "")
+        post_high = ohlc_info.get("high", "")
+        post_low = ohlc_info.get("low", "")
+        official_hit = bool(ohlc_info.get("official_hit", False))
+        official_date = str(ohlc_info.get("date", "") or "")
+        official_source = str(ohlc_info.get("source", "") or "")
+        if not official_hit or post_close in ["", None]:
+            compare_rows.append({
+                "股票": pre.get("股票", code),
+                "股票代碼": code,
+                "盤前快照時間": pre.get("時間", ""),
+                "快照邏輯": snapshot_mode,
+                "盤前收盤": pre.get("收盤", ""),
+                "盤前支撐": pre_support,
+                "盤前壓力": pre_resistance,
+                "盤前建議進場": pre_entry,
+                "盤前停損": pre_stop,
+                "盤前風報比": pre.get("風報比", ""),
+                "盤前結論": pre_con,
+                "盤前訊號": pre.get("交易訊號", ""),
+                "盤後收盤": "",
+                "盤後最高": "",
+                "盤後最低": "",
+                "盤後風報比": "",
+                "盤後結論": "官方資料未更新",
+                "盤後訊號": "⏳待確認",
+                "支撐驗證": "待官方更新",
+                "壓力驗證": "待官方更新",
+                "停損觸發": "待官方更新",
+                "是否可成交": "待官方更新",
+                "模擬進場價": pre.get("進場", ""),
+                "模擬收盤價": "",
+                "收盤模擬損益": "",
+                "收盤模擬報酬率%": "",
+                "收盤模擬結果": "待官方更新",
+                "模擬最高價": "",
+                "最高模擬損益": "",
+                "最高模擬報酬率%": "",
+                "最高模擬結果": "待官方更新",
+                "價格變化": "待官方更新",
+                "結構變化": "待官方更新",
+                "價量結論": now_item.get("價量結論", ""),
+                "判斷理由": f"尚未取得今日官方盤後資料，這次不再用舊日線冒充今日收盤。來源：{official_source or 'NONE'} 日期：{official_date or '--'}",
+                "變化判斷": "待官方更新"
+            })
+            continue
 
         support_check = "資料不足"
         resistance_check = "資料不足"
@@ -5906,6 +6078,8 @@ def compare_pre_snapshot_with_current(rows, market_score_adj, name_map, snapshot
             "盤後收盤": post_close,
             "盤後最高": post_high,
             "盤後最低": post_low,
+            "盤後資料日期": official_date,
+            "盤後資料來源": official_source,
             "盤後風報比": now_item.get("風報比", ""),
             "盤後結論": now_con,
             "盤後訊號": now_sig,
@@ -6032,6 +6206,115 @@ def _pick_live_price(row: dict):
     return _safe_float(row.get("TWSE收盤")) or _safe_float(row.get("收盤")) or _safe_float(row.get("盤後收盤"))
 
 
+def _position_symbol(row: dict) -> str:
+    return str(row.get("_code") or row.get("股票代碼") or "").strip().upper()
+
+
+@st.cache_data(ttl=1200, show_spinner=False)
+def fetch_position_delayed_quote(symbol: str):
+    """持倉中心專用：用 20 分鐘快取抓盤中延遲參考價，穩定優先。"""
+    symbol = str(symbol or "").strip().upper()
+    if not symbol:
+        return {"price": None, "high": None, "low": None, "volume": None, "time": "", "source": "無代碼"}
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {
+        "interval": "1m",
+        "range": "1d",
+        "includePrePost": "false",
+        "events": "div,splits",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    }
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.ok:
+            data = resp.json()
+            result = ((data or {}).get("chart") or {}).get("result") or []
+            if result:
+                r0 = result[0] or {}
+                meta = r0.get("meta") or {}
+                timestamps = r0.get("timestamp") or []
+                indicators = ((r0.get("indicators") or {}).get("quote") or [{}])[0] or {}
+                closes = indicators.get("close") or []
+                highs = indicators.get("high") or []
+                lows = indicators.get("low") or []
+                volumes = indicators.get("volume") or []
+
+                last_price = None
+                for v in reversed(closes):
+                    p = _safe_float(v)
+                    if p is not None:
+                        last_price = p
+                        break
+                if last_price is None:
+                    last_price = _safe_float(meta.get("regularMarketPrice")) or _safe_float(meta.get("previousClose"))
+
+                day_high = max([_safe_float(v) for v in highs if _safe_float(v) is not None], default=_safe_float(meta.get("regularMarketDayHigh")))
+                day_low = min([_safe_float(v) for v in lows if _safe_float(v) is not None], default=_safe_float(meta.get("regularMarketDayLow")))
+
+                last_volume = None
+                for v in reversed(volumes):
+                    vv = _safe_float(v)
+                    if vv is not None:
+                        last_volume = vv
+                        break
+                if last_volume is None:
+                    last_volume = _safe_float(meta.get("regularMarketVolume"))
+
+                quote_time = ""
+                if timestamps:
+                    try:
+                        quote_time = datetime.fromtimestamp(int(timestamps[-1])).strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        quote_time = ""
+                if not quote_time and meta.get("regularMarketTime"):
+                    try:
+                        quote_time = datetime.fromtimestamp(int(meta.get("regularMarketTime"))).strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        quote_time = ""
+
+                return {
+                    "price": round(last_price, 2) if last_price is not None else None,
+                    "high": round(day_high, 2) if day_high is not None else None,
+                    "low": round(day_low, 2) if day_low is not None else None,
+                    "volume": int(last_volume) if last_volume is not None else None,
+                    "time": quote_time,
+                    "source": "盤中延遲參考價（20分鐘快取）",
+                }
+    except Exception:
+        pass
+
+    return {
+        "price": None,
+        "high": None,
+        "low": None,
+        "volume": None,
+        "time": "",
+        "source": "盤中延遲參考價抓取失敗",
+    }
+
+
+def resolve_position_reference_quote(row: dict):
+    symbol = _position_symbol(row)
+    quote = fetch_position_delayed_quote(symbol)
+    price = _safe_float(quote.get("price"))
+    if price is not None:
+        return quote
+    return {
+        "price": _pick_live_price(row),
+        "high": _safe_float(row.get("TWSE最高")) or _safe_float(row.get("高")) or _safe_float(row.get("收盤")),
+        "low": _safe_float(row.get("TWSE最低")) or _safe_float(row.get("低")) or _safe_float(row.get("收盤")),
+        "volume": _safe_float(row.get("TWSE成交量")) or _safe_float(row.get("成交量")),
+        "time": fmt_text(row.get("TWSE日期", "")) if str(row.get("TWSE日期", "")).strip() else "",
+        "source": "回退到官方日資料/盤前資料",
+    }
+
+
 def kdj_signal(row: dict) -> str:
     k = _safe_float(row.get("KD_K"))
     d = _safe_float(row.get("KD_D"))
@@ -6058,13 +6341,14 @@ def macd_signal(row: dict) -> str:
     return "中性"
 
 
-def build_position_plan(row: dict, entry_price: float, side: str = "做多", shares: int = 1000, mode: str = "短線"):
-    current_price = _pick_live_price(row)
+def build_position_plan(row: dict, entry_price: float, side: str = "做多", shares: int = 1000, mode: str = "當沖", reference_quote: dict | None = None):
+    reference_quote = reference_quote or {}
+    current_price = _safe_float(reference_quote.get("price")) or _pick_live_price(row)
     long_support = _safe_float(row.get("支撐"))
     long_resistance = _safe_float(row.get("短期壓力"))
     long_stop = _safe_float(row.get("停損"))
-    long_target1 = _safe_float(row.get("目標")) or long_resistance
-    long_target2 = _safe_float(row.get("突破目標")) or _safe_float(row.get("中繼目標"))
+    long_target1 = _safe_float(row.get("中繼目標")) or _safe_float(row.get("目標")) or long_resistance
+    long_target2 = _safe_float(row.get("突破目標")) or long_resistance
 
     short_map = build_short_strategy(row)
     short_resistance = _safe_float(short_map.get("空方短期壓力"))
@@ -6192,6 +6476,11 @@ def build_position_plan(row: dict, entry_price: float, side: str = "做多", sha
         "cost_zone": cost_zone,
         "action": action,
         "reason": reason,
+        "price_source": fmt_text(reference_quote.get("source", "")) or "--",
+        "price_time": fmt_text(reference_quote.get("time", "")) or "",
+        "day_high": _safe_float(reference_quote.get("high")),
+        "day_low": _safe_float(reference_quote.get("low")),
+        "day_volume": _safe_float(reference_quote.get("volume")),
     }
 
 
@@ -6283,6 +6572,258 @@ def evaluate_entry_alignment(actual_entry: float | None, plan_entry: float | Non
         alignment = "低於原始進場"
         note = f"你的多單成本比原始進場低 {abs(gap_pct):.2f}% ，成本相對有利。"
     return {"entry_gap_pct": gap_pct, "alignment": alignment, "alignment_note": note}
+
+
+
+def build_dynamic_hold_decision(row: dict, plan: dict, tracking: dict):
+    side = plan.get("side", "做多")
+    current = _safe_float(plan.get("current_price"))
+    entry = _safe_float(plan.get("entry_price"))
+    pnl_pct = _safe_float(plan.get("pnl_pct"))
+    stop = _safe_float(plan.get("stop"))
+    support = _safe_float(plan.get("support"))
+    resistance = _safe_float(plan.get("resistance"))
+    target1 = _safe_float(plan.get("target1"))
+    target2 = _safe_float(plan.get("target2"))
+    conclusion = fmt_text(tracking.get("plan_conclusion", ""))
+    signal = fmt_text(tracking.get("plan_signal", ""))
+    mode = fmt_text(plan.get("mode", "當沖")) or "當沖"
+
+    technical_structure = "中性"
+    position_state = "觀察中"
+    risk_level = "中"
+    advice = "觀察"
+    action_hint = "先觀察"
+    summary = "先看目前價格相對停損、壓力與目標的位置，再決定是否續抱。"
+    reasons = []
+
+    def pct_text(val):
+        return f"{val:.2f}%" if val is not None else "--"
+
+    if current is None:
+        return {
+            "advice": "資料不足",
+            "risk_level": "高",
+            "technical_structure": "資料不足",
+            "position_state": "無法判讀",
+            "action_hint": "先觀察",
+            "summary": "目前抓不到最新價格，先不要用這頁做盤中決策。",
+            "reasons": ["最新價格未更新", "請稍後再按一次計算持倉判讀"],
+        }
+
+    to_stop_pct = tracking.get("to_stop_pct")
+    to_resistance_pct = tracking.get("to_resistance_pct")
+    to_mid_pct = tracking.get("to_mid_pct")
+    to_breakout_pct = tracking.get("to_breakout_pct")
+
+    # 當沖優先：先看實際成本損益，再看技術位置
+    if pnl_pct is not None:
+        if pnl_pct >= 3:
+            position_state = "獲利擴大"
+        elif pnl_pct >= 1:
+            position_state = "穩定獲利"
+        elif pnl_pct >= 0:
+            position_state = "小幅獲利"
+        elif pnl_pct > -1.5:
+            position_state = "逆風警戒"
+        elif pnl_pct > -3:
+            position_state = "逆風擴大"
+        else:
+            position_state = "部位失效"
+
+    if side == "做空":
+        # 先處理當沖空單成本失控
+        if pnl_pct is not None and pnl_pct <= -3:
+            technical_structure = "失效"
+            risk_level = "極高"
+            advice = "出場"
+            action_hint = "優先回補"
+            summary = f"這筆空單目前虧損 {abs(pnl_pct):.2f}% ，以當沖邏輯已屬異常部位，先回補控風險，不再用技術面硬抱。"
+            reasons = [
+                f"當沖空單虧損 {abs(pnl_pct):.2f}% 已超過異常門檻",
+                f"成本 {fmt_price_with_unit(entry)} 與現價 {fmt_price_with_unit(current)} 差距過大",
+            ]
+        elif pnl_pct is not None and pnl_pct <= -2:
+            technical_structure = "失效"
+            risk_level = "極高"
+            advice = "出場"
+            action_hint = "部位失效先回補"
+            summary = f"這筆空單目前虧損 {abs(pnl_pct):.2f}% ，已超過一般當沖可容忍範圍，先回補比續抱合理。"
+            reasons = [
+                f"當沖空單虧損 {abs(pnl_pct):.2f}% 已超過部位失效門檻",
+                "這不是等待再轉弱的節奏，先把風險收掉",
+            ]
+        elif pnl_pct is not None and pnl_pct <= -1.5:
+            technical_structure = "轉弱"
+            risk_level = "高"
+            advice = "出場"
+            action_hint = "優先回補"
+            summary = f"這筆空單目前虧損 {abs(pnl_pct):.2f}% ，以當沖來說已偏大，不建議再期待技術面自己修復。"
+            reasons = [
+                f"當沖空單虧損 {abs(pnl_pct):.2f}% 已超過警戒門檻",
+                "先回補、等更好的空點，比硬扛更務實",
+            ]
+        elif stop is not None and current >= stop:
+            technical_structure = "偏弱"
+            risk_level = "高"
+            advice = "出場"
+            action_hint = "碰停損先回補"
+            summary = "現價已到空方停損區，原本空方節奏被破壞，這時候續抱風險高於報酬。"
+            reasons = [f"現價 {fmt_price_with_unit(current)} 已到空方停損 {fmt_price_with_unit(stop)}", "原始空方計畫失效，先把風險收掉"]
+        elif target2 is not None and current <= target2:
+            technical_structure = "偏強"
+            risk_level = "低"
+            advice = "減碼"
+            action_hint = "高獲利區先回補大半"
+            summary = "現價已到跌破目標區，代表空方計畫已跑到高獲利段，先回補大半最穩。"
+            reasons = [f"已到第二目標 {fmt_price_with_unit(target2)}", "先鎖住大部分獲利，再決定剩餘部位"]
+        elif target1 is not None and current <= target1:
+            technical_structure = "偏強"
+            risk_level = "中低"
+            advice = "減碼續抱"
+            action_hint = "第一回補區先收一部分"
+            summary = "現價已到第一回補區，先回補一部分，把已到手的空方優勢先鎖住。"
+            reasons = [f"已到第一目標 {fmt_price_with_unit(target1)}", "剩餘部位再看有沒有續跌空間"]
+        elif resistance is not None and current >= resistance * 0.985:
+            technical_structure = "轉弱"
+            risk_level = "中高"
+            advice = "觀察"
+            action_hint = "靠壓力不追空"
+            summary = "現價已反彈到空方壓力附近，這裡比較像等轉弱訊號，不適合直接樂觀續抱。"
+            reasons = [f"現價接近空方壓力 {fmt_price_with_unit(resistance)}", "若再站上去，空方結構就會被破壞"]
+        elif conclusion in ["中性偏多", "看多"] or signal == "🔥進場":
+            technical_structure = "轉弱"
+            risk_level = "中高"
+            advice = "觀察"
+            action_hint = "嚴設停損續抱"
+            summary = "整體技術面對空方不算友善，雖然空方計畫還沒失效，但不適合太樂觀。"
+            reasons = [f"原始結論：{conclusion or '--'}", f"原始訊號：{signal or '--'}"]
+        elif pnl_pct is not None and pnl_pct >= 3:
+            technical_structure = "偏強"
+            risk_level = "低"
+            advice = "續抱"
+            action_hint = "續抱並移動停利"
+            summary = "這筆空單已進入當沖優勢段，可續抱，但停利要跟上，不要讓獲利回吐太多。"
+            reasons = [f"目前獲利 {pnl_pct:.2f}%", f"到停損剩餘：{pct_text(to_stop_pct)}"]
+        else:
+            technical_structure = "中性偏強"
+            risk_level = "中" if (to_stop_pct is not None and to_stop_pct < 3) else "中低"
+            advice = "續抱"
+            action_hint = "續抱但停損要跟緊"
+            summary = "目前還在空方節奏內，可以續抱，但只要站回壓力上方就不要再拖。"
+            reasons = [f"到停損剩餘：{pct_text(to_stop_pct)}", f"到第一目標空間：{pct_text(to_mid_pct)}"]
+    else:
+        # 先處理當沖多單成本失控
+        if pnl_pct is not None and pnl_pct <= -3:
+            technical_structure = "失效"
+            risk_level = "極高"
+            advice = "出場"
+            action_hint = "優先出場"
+            summary = f"這筆多單目前虧損 {abs(pnl_pct):.2f}% ，以當沖邏輯已屬異常部位，先出場控風險，不再用技術面硬抱。"
+            reasons = [
+                f"當沖多單虧損 {abs(pnl_pct):.2f}% 已超過異常門檻",
+                f"成本 {fmt_price_with_unit(entry)} 與現價 {fmt_price_with_unit(current)} 差距過大",
+            ]
+        elif pnl_pct is not None and pnl_pct <= -2:
+            technical_structure = "失效"
+            risk_level = "極高"
+            advice = "出場"
+            action_hint = "部位失效優先出場"
+            summary = f"這筆多單目前虧損 {abs(pnl_pct):.2f}% ，已超過一般當沖可容忍範圍，先出場比續抱合理。"
+            reasons = [
+                f"當沖多單虧損 {abs(pnl_pct):.2f}% 已超過部位失效門檻",
+                "這不是一般回檔，先把風險收掉更務實",
+            ]
+        elif pnl_pct is not None and pnl_pct <= -1.5:
+            technical_structure = "轉弱"
+            risk_level = "高"
+            advice = "出場"
+            action_hint = "優先出場"
+            summary = f"這筆多單目前虧損 {abs(pnl_pct):.2f}% ，以當沖來說已偏大，不建議再期待技術面自己修復。"
+            reasons = [
+                f"當沖多單虧損 {abs(pnl_pct):.2f}% 已超過警戒門檻",
+                "先出場、等更好的點，比硬抱更合理",
+            ]
+        elif stop is not None and current <= stop:
+            technical_structure = "偏弱"
+            risk_level = "高"
+            advice = "出場"
+            action_hint = "碰停損先出"
+            summary = "現價已到停損區，原本多方計畫失效，這時候再抱下去風險通常大於報酬。"
+            reasons = [f"現價 {fmt_price_with_unit(current)} 已到停損 {fmt_price_with_unit(stop)}", "先保住本金，不要再期待它自己彈回來"]
+        elif support is not None and current < support:
+            technical_structure = "轉弱"
+            risk_level = "高" if pnl_pct is not None and pnl_pct <= 0 else "中高"
+            advice = "減碼" if pnl_pct is not None and pnl_pct > 0 else "出場"
+            action_hint = "跌破支撐先保守"
+            summary = "現價已跌破原本支撐，這表示多方結構開始轉弱，續抱時要更保守。"
+            reasons = [f"現價跌破支撐 {fmt_price_with_unit(support)}", "若站不回去，這筆多單優勢會越來越小"]
+        elif target2 is not None and current >= target2:
+            technical_structure = "偏強"
+            risk_level = "低"
+            advice = "減碼"
+            action_hint = "高獲利區先收大半"
+            summary = "現價已到第二目標區，代表這筆多單已跑到高獲利段，先收大半最穩。"
+            reasons = [f"已到第二目標 {fmt_price_with_unit(target2)}", "先把大部分獲利鎖住，剩餘部位再用停利續抱"]
+        elif target1 is not None and current >= target1:
+            technical_structure = "偏強"
+            risk_level = "中低"
+            advice = "減碼續抱"
+            action_hint = "第一目標先收一部分"
+            summary = "現價已到第一目標區，先收一部分，把帳上獲利鎖住，再看能不能續攻。"
+            reasons = [f"已到第一目標 {fmt_price_with_unit(target1)}", "剩餘部位可視走勢決定是否續抱"]
+        elif resistance is not None and current >= resistance * 0.985:
+            technical_structure = "中性"
+            risk_level = "中"
+            advice = "減碼續抱"
+            action_hint = "碰壓力先減碼"
+            summary = "現價已靠近短期壓力，這裡比較像先觀察突破結果，不適合無腦續抱。"
+            reasons = [f"現價接近短壓 {fmt_price_with_unit(resistance)}", "若突破不了，容易先回檔"]
+        elif conclusion in ["中性偏空", "看空"] or signal == "❌不進":
+            technical_structure = "轉弱"
+            risk_level = "中高"
+            advice = "觀察"
+            action_hint = "不加碼、嚴設停損"
+            summary = "雖然你這筆單不一定立刻有問題，但整體技術結構對多方不算友善，續抱時要更重視風控。"
+            reasons = [f"原始結論：{conclusion or '--'}", f"原始訊號：{signal or '--'}"]
+        elif pnl_pct is not None and pnl_pct >= 3:
+            technical_structure = "偏強"
+            risk_level = "低"
+            advice = "續抱"
+            action_hint = "續抱並移動停利"
+            summary = "這筆多單已進入當沖優勢段，可續抱，但停利要跟上，不要讓獲利回吐太多。"
+            reasons = [f"目前獲利 {pnl_pct:.2f}%", f"到停損剩餘：{pct_text(to_stop_pct)}"]
+        elif pnl_pct is not None and pnl_pct >= 1:
+            technical_structure = "中性偏強"
+            risk_level = "中低"
+            advice = "續抱"
+            action_hint = "續抱但不戀戰"
+            summary = "目前仍是當沖可接受的獲利段，可以續抱，但靠近壓力就要提高警覺。"
+            reasons = [f"目前獲利 {pnl_pct:.2f}%", f"到短壓剩餘：{pct_text(to_resistance_pct)}"]
+        else:
+            technical_structure = "中性偏強"
+            risk_level = "中" if (to_stop_pct is not None and to_stop_pct < 3) else "中低"
+            advice = "續抱"
+            action_hint = "續抱但支撐要守住"
+            summary = "目前還在支撐與目標之間，這個價位仍可續抱，但一旦支撐失守就不要再拖。"
+            reasons = [f"到停損剩餘：{pct_text(to_stop_pct)}", f"到第一目標空間：{pct_text(to_mid_pct)}"]
+
+    # 附加說明：當沖模式下，若成本與現價偏離太大，額外提示部位已不適合再用盤中技術續抱
+    if mode == "當沖" and pnl_pct is not None and pnl_pct <= -3 and side != "做空":
+        reasons = reasons[:3] + ["這筆部位已不適合再用當沖續抱邏輯處理"]
+    if mode == "當沖" and pnl_pct is not None and pnl_pct <= -3 and side == "做空":
+        reasons = reasons[:3] + ["這筆部位已不適合再用當沖空單續抱邏輯處理"]
+
+    return {
+        "advice": advice,
+        "risk_level": risk_level,
+        "technical_structure": technical_structure,
+        "position_state": position_state,
+        "action_hint": action_hint,
+        "summary": summary,
+        "reasons": reasons[:4],
+    }
+
 
 
 def build_position_tracking(row: dict, plan: dict):
@@ -6555,7 +7096,7 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     cols = st.columns(short_cols_per_row)
                     for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
                         col.metric(label, value)
-                st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
+                st.caption("空方策略正式版：V178 已將空方短期壓力、建議進場、停損、中繼目標與跌破目標全部限制在次日可交易邊界內，避免再跑出偏波段的過寬數值。")
 
             render_reason_block(row, "本檔判斷理由")
 
@@ -6713,8 +7254,8 @@ if st.session_state.current_page == "分析中心":
             auto_pick_mode = st.selectbox("自動挑股模式", ["一般模式", "嚴格模式", "做空模式"], index=0)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
-        st.caption("一般模式：偏活躍/爆量/強勢題材；嚴格模式：偏低風險/高風報比/訊號乾淨；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
-        st.caption("V170：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
+        st.caption("一般模式：多方當沖優先，偏活躍/量價同步/可執行停損；嚴格模式：多方當沖且風報比較乾淨；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
         op3, op4 = st.columns(2)
@@ -6816,14 +7357,9 @@ if st.session_state.current_page == "分析中心":
         if auto_pick_mode == "嚴格模式":
             candidates = []
             for item in source_candidates:
-                if item["排名分組"] == "D_後段排除":
+                if not is_intraday_long_candidate(item, strict=True):
                     continue
-                if item["風報比"] < 1.0:
-                    continue
-                if item["突破狀態"] == "假突破風險":
-                    continue
-                if item["交易訊號"] == "❌不進":
-                    continue
+                item = item.copy()
                 item["策略模式"] = "嚴格模式"
                 item["_auto_mode_score"] = auto_pick_strict_score(item)
                 candidates.append(item)
@@ -6847,6 +7383,9 @@ if st.session_state.current_page == "分析中心":
         else:
             candidates = []
             for item in source_candidates:
+                if not is_intraday_long_candidate(item, strict=False):
+                    continue
+                item = item.copy()
                 item["策略模式"] = "一般模式"
                 item["_auto_mode_score"] = auto_pick_general_score(item)
                 candidates.append(item)
@@ -7291,7 +7830,8 @@ if st.session_state.current_page == "持倉中心":
     with ctl4:
         pos_shares = st.number_input("股數", min_value=1, value=1000, step=1000, key="position_shares")
     with ctl5:
-        pos_mode = st.selectbox("交易模式", ["當沖", "短線", "波段"], index=1, key="position_mode")
+        pos_mode = "當沖"
+        st.text_input("交易模式", value="當沖", disabled=True, key="position_mode_display")
 
     btn1, btn2 = st.columns([1.2, 1.8])
     calc_position = btn1.button("計算持倉判讀", use_container_width=True)
@@ -7302,7 +7842,8 @@ if st.session_state.current_page == "持倉中心":
         else:
             st.info("目前分析中心尚未選定股票。")
 
-    st.info("V158 持倉中心主流程改成先看現況對照，再看原始計畫；技術與結構改成預設收合，避免中段資訊過長影響出場判讀。")
+    st.info("V178 持倉中心維持當沖優先判讀；空方總表同步改成當沖可交易邊界，不再讓空方進場、停損與目標跑到明顯偏波段的位置。")
+    st.caption("盤中持倉判讀優先使用延遲參考價（20 分鐘快取）；若抓取失敗，才回退到官方日資料或盤前分析值。")
 
 
     if calc_position:
@@ -7318,12 +7859,15 @@ if st.session_state.current_page == "持倉中心":
             else:
                 enriched_rows, _, _ = try_apply_twse_hybrid([base_row])
                 base_row = enriched_rows[0] if enriched_rows else base_row
-                base_plan = build_position_plan(base_row, float(pos_entry), pos_side, int(pos_shares), pos_mode)
+                position_quote = resolve_position_reference_quote(base_row)
+                base_plan = build_position_plan(base_row, float(pos_entry), pos_side, int(pos_shares), pos_mode, position_quote)
                 tracking = build_position_tracking(base_row, base_plan)
+                hold_decision = build_dynamic_hold_decision(base_row, base_plan, tracking)
                 st.session_state.position_result = {
                     "row": base_row,
                     "plan": base_plan,
                     "tracking": tracking,
+                    "hold_decision": hold_decision,
                 }
 
     position_pack = st.session_state.get("position_result")
@@ -7333,21 +7877,46 @@ if st.session_state.current_page == "持倉中心":
         row = position_pack["row"]
         plan = position_pack["plan"]
         tracking = position_pack.get("tracking") or build_position_tracking(row, plan)
+        hold_decision = position_pack.get("hold_decision") or build_dynamic_hold_decision(row, plan, tracking)
 
-        top1, top2, top3, top4 = st.columns(4)
-        top1.metric("部位狀態", tracking.get("status", "--"))
-        top2.metric("最新價格", fmt_price_with_unit(plan.get("current_price")))
-        top3.metric("未實現損益", (f"{plan.get('pnl_amount'):,.0f} 元" if plan.get("pnl_amount") is not None else "--"))
-        top4.metric("報酬率", (f"{plan.get('pnl_pct'):.2f}%" if plan.get("pnl_pct") is not None else "--"))
+        top1, top2, top3, top4, top5 = st.columns(5)
+        top1.metric("留倉建議", hold_decision.get("advice", "--"))
+        top2.metric("技術結構", hold_decision.get("technical_structure", "--"))
+        top3.metric("最新價格", fmt_price_with_unit(plan.get("current_price")))
+        top4.metric("未實現損益", (f"{plan.get('pnl_amount'):,.0f} 元" if plan.get("pnl_amount") is not None else "--"))
+        top5.metric("報酬率", (f"{plan.get('pnl_pct'):.2f}%" if plan.get("pnl_pct") is not None else "--"))
+        st.caption(f"價格來源：{fmt_text(plan.get('price_source', '')) or '--'}" + (f"｜更新時間：{fmt_text(plan.get('price_time', ''))}" if fmt_text(plan.get('price_time', '')) else ""))
+        q1, q2, q3 = st.columns(3)
+        q1.metric("盤中參考高", fmt_price_with_unit(plan.get("day_high")))
+        q2.metric("盤中參考低", fmt_price_with_unit(plan.get("day_low")))
+        q3.metric("盤中參考量", fmt_lots(plan.get("day_volume")))
 
         chips = [
             f"方向：{plan.get('side', '--')}",
             f"模式：{plan.get('mode', '--')}",
+            f"風險等級：{hold_decision.get('risk_level', '--')}",
+            f"部位狀態：{hold_decision.get('position_state', '--')}",
             f"計畫對齊：{tracking.get('alignment', '--')}",
             f"系統結論：{tracking.get('plan_conclusion', '--')}",
             f"交易訊號：{tracking.get('plan_signal', '--')}",
         ]
         render_position_status_chips(chips)
+
+        with st.expander("動態留倉判讀", expanded=False):
+            st.caption("用你現在看到的價位，直接判斷這筆單適不適合續抱、減碼或出場。")
+            d1, d2 = st.columns([1.2, 2.8] if not st.session_state.mobile_mode else [1,1])
+            with d1:
+                with st.container(border=True):
+                    st.markdown("#### 留倉判斷")
+                    st.metric("建議動作", hold_decision.get("action_hint", "--"))
+                    st.metric("風險等級", hold_decision.get("risk_level", "--"))
+                    st.metric("部位狀態", hold_decision.get("position_state", "--"))
+            with d2:
+                with st.container(border=True):
+                    st.markdown("#### 判斷理由")
+                    st.write(hold_decision.get("summary", "--"))
+                    for i, reason in enumerate(hold_decision.get("reasons", []), start=1):
+                        st.write(f"{i}. {reason}")
 
         render_section_divider("現況對照", "先直接看現在離停損、壓力、中繼、突破各還有多少空間，這是持倉中心最優先資訊。")
         lv1, lv2, lv3, lv4 = st.columns(4)
@@ -7414,9 +7983,10 @@ if st.session_state.current_page == "持倉中心":
         if lower_cols is None:
             with st.container(border=True):
                 st.markdown("#### 出場重點")
-                st.write(f"1. 部位狀態：**{tracking.get('status', '--')}**")
-                st.write(f"2. 目前建議：**{plan.get('action', '--')}**")
-                st.write(f"3. 原因：{plan.get('reason', '--')}")
+                st.write(f"1. 留倉建議：**{hold_decision.get('advice', '--')}**")
+                st.write(f"2. 建議動作：**{hold_decision.get('action_hint', '--')}**")
+                st.write(f"3. 風險等級：**{hold_decision.get('risk_level', '--')}**")
+                st.write(f"4. 判斷重點：{hold_decision.get('summary', '--')}")
             with st.container(border=True):
                 st.markdown("#### 參考摘要")
                 for key in ["摘要1", "摘要2", "摘要3"]:
@@ -7427,10 +7997,10 @@ if st.session_state.current_page == "持倉中心":
             with lower_cols[0]:
                 with st.container(border=True):
                     st.markdown("#### 出場重點")
-                    st.write(f"1. 部位狀態：**{tracking.get('status', '--')}**")
-                    st.write(f"2. 目前建議：**{plan.get('action', '--')}**")
-                    st.write(f"3. 原因：{plan.get('reason', '--')}")
-                    st.write("4. 先看計畫有沒有偏離，再看要不要續抱，不要只盯著帳面損益。")
+                    st.write(f"1. 留倉建議：**{hold_decision.get('advice', '--')}**")
+                    st.write(f"2. 建議動作：**{hold_decision.get('action_hint', '--')}**")
+                    st.write(f"3. 風險等級：**{hold_decision.get('risk_level', '--')}**")
+                    st.write(f"4. 判斷重點：{hold_decision.get('summary', '--')}")
             with lower_cols[1]:
                 with st.container(border=True):
                     st.markdown("#### 參考摘要")
@@ -7445,6 +8015,7 @@ if st.session_state.current_page == "持倉中心":
             ref2.metric("操作評級", fmt_text(row.get("操作評級", "")) or "--")
             ref3.metric("原始風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
             ref4.metric("成本位置", fmt_text(plan.get("cost_zone", "")) or "--")
+            ref4.caption(f"技術結構：{hold_decision.get('technical_structure', '--')}")
             ref5, ref6, ref7, ref8, ref9 = st.columns(5)
             ref5.metric("KD-K", fmt_price(row.get("KD_K", "")) or "--")
             ref6.metric("KD-D", fmt_price(row.get("KD_D", "")) or "--")
