@@ -10,6 +10,8 @@ import requests
 import urllib3
 from urllib.error import URLError, HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import warnings
+import logging
 
 import pandas as pd
 import streamlit as st
@@ -19,10 +21,17 @@ from plotly.subplots import make_subplots
 import candidate_engine as ce
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore", message=".*use_container_width.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=r".*Downcasting object dtype arrays on \.fillna.*")
+try:
+    pd.set_option("future.no_silent_downcasting", True)
+except Exception:
+    pass
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-APP_VERSION = "V159"
+APP_VERSION = "V170"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "候選池引擎第二階段加速穩定版：單股搜尋走獨立快取路徑，候選池分析改為逐股快取＋失敗冷卻＋偵錯摘要，先確認 250 檔速度與穩定性。"
+APP_VERSION_NOTE = "資料源分流加速版：候選池改成靜態清單，不再自動官方補資料；單股詳細分析改成延後載入法人與圖表，優先修正手動搜尋與切股過慢問題。"
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
@@ -500,16 +509,105 @@ def load_name_map():
     return name_map
 
 
+def _ordered_candidate_codes(name_map: dict, seed_list=None):
+    ordered_codes = []
+    seen = set()
+    for code in (seed_list or watchlist_default):
+        c = str(code).strip().upper()
+        if c and c not in seen:
+            ordered_codes.append(c)
+            seen.add(c)
+    for full_code in sorted(name_map.keys()):
+        base_code = str(full_code).upper().strip().split(".")[0]
+        if re.fullmatch(r"\d{4}", base_code) and base_code not in seen:
+            ordered_codes.append(base_code)
+            seen.add(base_code)
+    return ordered_codes
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _filter_pool_with_official_snapshot(code_list, max_price: float = 1100.0, target_count: int | None = None):
+    ordered = [str(x).strip().upper() for x in (code_list or []) if str(x).strip()]
+    if not ordered:
+        return []
+    try:
+        latest_snapshot_df = load_latest_snapshot()
+    except Exception:
+        latest_snapshot_df = pd.DataFrame()
+    snap_map = {}
+    if latest_snapshot_df is not None and not latest_snapshot_df.empty and "_merge_code" in latest_snapshot_df.columns:
+        snap_map = latest_snapshot_df.set_index("_merge_code", drop=False).to_dict("index")
+
+    pool, missing, over_price = [], [], []
+    for code in ordered:
+        merge_code = _normalize_merge_code(code)
+        row = snap_map.get(merge_code)
+        if row is None:
+            missing.append(code)
+            continue
+        close = _to_number_or_none(row.get("close"))
+        if close is None:
+            missing.append(code)
+            continue
+        if close > max_price:
+            over_price.append(code)
+            continue
+        pool.append(code)
+        if target_count and len(pool) >= target_count:
+            return pool[:target_count]
+
+    for code in missing:
+        if code not in over_price and code not in pool:
+            pool.append(code)
+            if target_count and len(pool) >= target_count:
+                break
+    return pool[:target_count] if target_count else pool
+
+
 @st.cache_data(ttl=21600, show_spinner=False)
-def build_candidate_pool_250(name_map: dict, max_price: float = 1100.0, target_count: int = 250):
-    return ce.build_candidate_pool_250(
-        name_map=name_map,
-        resolve_symbol=resolve_symbol,
-        indicators=indicators,
-        watchlist_default=watchlist_default,
-        max_price=max_price,
-        target_count=target_count,
-    )
+def build_candidate_pool_250(name_map: dict, max_price: float = 1100.0, target_count: int = 250, seed_list=None):
+    ordered_codes = _ordered_candidate_codes(name_map, seed_list=seed_list)
+    uniq = []
+    seen = set()
+    for code in ordered_codes:
+        c = str(code).strip().upper()
+        if not c or c in seen:
+            continue
+        uniq.append(c)
+        seen.add(c)
+        if target_count and len(uniq) >= target_count:
+            break
+    return uniq[:target_count] if target_count else uniq
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def build_candidate_core_pool(name_map: dict, max_price: float = 1100.0):
+    ordered_codes = _ordered_candidate_codes(name_map, seed_list=watchlist_default)
+    uniq = []
+    seen = set()
+    for code in ordered_codes[:len(watchlist_default)]:
+        c = str(code).strip().upper()
+        if not c or c in seen:
+            continue
+        uniq.append(c)
+        seen.add(c)
+    return uniq
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def build_candidate_pool_layers(name_map: dict, max_price: float = 1100.0, expanded_target: int = 250):
+    core_pool = build_candidate_core_pool(name_map, max_price=max_price)
+    full_pool = build_candidate_pool_250(name_map, max_price=max_price, target_count=expanded_target, seed_list=watchlist_default)
+    core_set = {str(x).strip().upper() for x in core_pool}
+    expansion_pool = [code for code in full_pool if str(code).strip().upper() not in core_set]
+    return {
+        "core_pool": core_pool,
+        "expansion_pool": expansion_pool,
+        "full_pool": full_pool,
+        "core_count": len(core_pool),
+        "expansion_count": len(expansion_pool),
+        "full_count": len(full_pool),
+    }
 
 
 def load_favorites():
@@ -762,10 +860,78 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_dif"], df["macd_dea"], df["macd_bar"] = calc_macd(close_col)
 
     return df
+def _official_latest_row_for_symbol(symbol: str):
+    try:
+        latest_snapshot_df = load_latest_snapshot()
+    except Exception:
+        return None
+    if latest_snapshot_df is None or latest_snapshot_df.empty or "_merge_code" not in latest_snapshot_df.columns:
+        return None
+    merge_code = _normalize_merge_code(symbol)
+    if not merge_code:
+        return None
+    try:
+        snap = latest_snapshot_df.set_index("_merge_code", drop=False)
+    except Exception:
+        return None
+    if merge_code not in snap.index:
+        return None
+    row = snap.loc[merge_code]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[-1]
+    return row
+
+
+def _apply_official_latest_bar(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_df(df)
+    if df is None or df.empty:
+        return df
+    s = _official_latest_row_for_symbol(symbol)
+    if s is None:
+        return df
+    official_date = pd.to_datetime(_roc_to_ad(s.get("date", "")), errors="coerce")
+    if pd.isna(official_date):
+        return df
+
+    official_open = _to_number_or_none(s.get("open"))
+    official_high = _to_number_or_none(s.get("high"))
+    official_low = _to_number_or_none(s.get("low"))
+    official_close = _to_number_or_none(s.get("close"))
+    official_volume = _to_number_or_none(s.get("volume"))
+
+    if official_close is None:
+        return df
+
+    base_open = official_open if official_open is not None else float(df["Open"].iloc[-1])
+    base_high = official_high if official_high is not None else max(float(df["High"].iloc[-1]), official_close)
+    base_low = official_low if official_low is not None else min(float(df["Low"].iloc[-1]), official_close)
+    base_volume = official_volume if official_volume is not None else float(df["Volume"].iloc[-1])
+
+    last_idx = pd.to_datetime(df.index[-1]).normalize()
+    target_idx = official_date.normalize()
+    new_row = {
+        "Open": base_open,
+        "High": max(base_high, official_close, base_open),
+        "Low": min(base_low, official_close, base_open),
+        "Close": official_close,
+        "Volume": base_volume,
+    }
+
+    if target_idx > last_idx:
+        df.loc[target_idx] = new_row
+    else:
+        df.loc[df.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+            new_row["Open"], new_row["High"], new_row["Low"], new_row["Close"], new_row["Volume"]
+        ]
+    df = df.sort_index()
+    return normalize_df(df)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def download_symbol(symbol: str) -> pd.DataFrame:
-    df = yf.download(symbol.strip(), period="8mo", interval="1d", auto_adjust=False, progress=False, threads=False)
-    return normalize_df(df)
+    df = yf.download(symbol.strip(), period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    df = normalize_df(df)
+    return _apply_official_latest_bar(symbol, df)
 
 
 def resolve_symbol(raw_input: str):
@@ -1708,13 +1874,16 @@ def resolve_institutional_context(stock_code: str, base_row: dict | pd.Series | 
     inst = get_stock_institutional(stock_code, inst_map)
     vol = safe_float_or_none(row_dict.get('成交量', None))
     close_price = safe_float_or_none(row_dict.get('收盤', None))
-    prev_close = None
-    try:
-        df_tmp = download_symbol(stock_code)
-        if df_tmp is not None and not df_tmp.empty and len(df_tmp) >= 2:
-            prev_close = safe_float_or_none(df_tmp['Close'].iloc[-2])
-    except Exception:
-        prev_close = None
+    prev_close = safe_float_or_none(row_dict.get("昨收", None))
+    if prev_close is None:
+        prev_close = safe_float_or_none(row_dict.get("前收", None))
+    if prev_close is None and close_price is not None:
+        try:
+            chg = safe_float_or_none(row_dict.get("TWSE漲跌價差", None))
+            if chg is not None:
+                prev_close = float(close_price) - float(chg)
+        except Exception:
+            prev_close = None
 
     if inst:
         signal = build_institutional_signal(stock_code, inst_map, vol, close_price, prev_close)
@@ -3403,6 +3572,20 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
     return results, debug
 
 
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_symbol_indicator_chart(symbol: str) -> pd.DataFrame:
+    """單股詳細分析專用：只抓單一股票並補齊技術指標，避免切換股票時整頁重算。"""
+    resolved_code, raw_df = resolve_symbol(symbol)
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    try:
+        df = indicators(raw_df)
+    except Exception:
+        return pd.DataFrame()
+    return df if df is not None else pd.DataFrame()
+
 def save_snapshot(snapshot_type: str, results, forced_mode: str | None = None):
     snaps = load_snapshots()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -4570,6 +4753,13 @@ def try_apply_twse_hybrid(rows):
         return safe_rows, meta, 0
 
 
+def load_cached_official_meta():
+    meta = _safe_twse_json(OFFICIAL_COMBINED_META_JSON)
+    if not isinstance(meta, dict) or not meta:
+        meta = _safe_twse_json(TWSE_LATEST_META_JSON)
+    return meta if isinstance(meta, dict) else {}
+
+
 
 ensure_names_file()
 name_map = load_name_map()
@@ -4615,7 +4805,7 @@ def render_global_banner():
     )
 
 with st.sidebar:
-    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 候選池分割版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線，不重做資料源；這版進入第二階段加速穩定：單股搜尋與候選池分流、逐股快取、失敗冷卻與候選池偵錯摘要，先確認 250 檔的速度與穩定性。</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 資料源分流版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線；這版把候選池來源改成靜態清單，分析中心不再自動做官方補資料，單股詳細分析改成延後載入法人與圖表，優先處理手動搜尋與切股過慢問題。</div></div>', unsafe_allow_html=True)
     page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -6175,6 +6365,314 @@ def render_position_status_chips(chips: list[str]):
         st.markdown(f'<div style="margin-top:0.2rem;">{chip_html}</div>', unsafe_allow_html=True)
 
 
+def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.DataFrame, name_map: dict, market_info: dict):
+    if select_source is None or len(select_source) == 0:
+        return
+    ensure_selected_code(select_source)
+    option_map = {row["股票"]: row["_code"] for _, row in select_source.iterrows()}
+    reverse_map = {v: k for k, v in option_map.items()}
+
+    with st.container(border=True):
+        st.markdown("### 單股詳細分析")
+        labels = list(option_map.keys())
+        current_label = reverse_map.get(st.session_state.selected_code, labels[0])
+
+        if st.session_state.mobile_mode:
+            selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label), key="detail_select_mobile")
+            st.session_state.selected_code = option_map[selected_display]
+            nav1, nav2 = st.columns(2)
+            if nav1.button("上一檔", use_container_width=True, key="detail_prev_mobile"):
+                move_selected(select_source, -1)
+            if nav2.button("下一檔", use_container_width=True, key="detail_next_mobile"):
+                move_selected(select_source, 1)
+            st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
+        else:
+            nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
+            with nav1:
+                if st.button("上一檔", use_container_width=True, key="detail_prev_pc"):
+                    move_selected(select_source, -1)
+            with nav2:
+                if st.button("下一檔", use_container_width=True, key="detail_next_pc"):
+                    move_selected(select_source, 1)
+            with nav3:
+                selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label), key="detail_select_pc")
+                st.session_state.selected_code = option_map[selected_display]
+            with nav4:
+                st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
+
+            st.markdown("#### 快速查看")
+            quick_cols = st.columns(min(5, len(select_source)))
+            top_quick = select_source.head(5)
+            for col, (_, quick_row) in zip(quick_cols, top_quick.iterrows()):
+                if col.button(quick_row["股票"], use_container_width=True, key=f"quick_{quick_row['_code']}"):
+                    st.session_state.selected_code = quick_row["_code"]
+
+        row = df_result[df_result["_code"] == st.session_state.selected_code].iloc[0].copy()
+
+        f1, f2 = st.columns([1,5])
+        with f1:
+            if st.session_state.selected_code not in st.session_state.favorites:
+                if st.button("加入最愛", key="detail_add_fav"):
+                    st.session_state.favorites.append(st.session_state.selected_code)
+                    save_favorites(st.session_state.favorites)
+            else:
+                if st.button("移除最愛", key="detail_remove_fav"):
+                    st.session_state.favorites = [x for x in st.session_state.favorites if x != st.session_state.selected_code]
+                    save_favorites(st.session_state.favorites)
+        with f2:
+            if st.session_state.selected_code in st.session_state.favorites:
+                st.success(f"{display_name(st.session_state.selected_code, name_map)} 已收藏到我的最愛。")
+
+        st.subheader(f"{reverse_map[st.session_state.selected_code]} 詳細分析")
+        st.caption("已分析結果內切換單股時，只更新本區塊；上方總表與候選股面板不會重新重算。")
+
+        detail_view_mode = st.radio("檢視模式", ["決策摘要", "技術細節", "官方資料"], horizontal=True, key="detail_view_mode")
+
+        if detail_view_mode == "決策摘要":
+            load_inst = st.toggle("載入法人資料", value=False, key=f"load_inst_{st.session_state.selected_code}")
+            if load_inst:
+                row = pd.Series(resolve_institutional_context(st.session_state.selected_code, row, fetch_institutional_bundle_all()))
+            else:
+                row = pd.Series(dict(row))
+                row["法人方向"] = row.get("法人方向", "未載入") or "未載入"
+                row["法人共振"] = row.get("法人共振", "未載入") or "未載入"
+                row["法人摘要"] = "法人資料未載入；需要時再手動開啟。"
+            st.markdown("#### 核心摘要")
+            core_top = [
+                ("收盤", f'{row["收盤"]:.2f}'),
+                ("進場", f'{row["進場"]:.2f}'),
+                ("停損", f'{row["停損"]:.2f}'),
+                ("短期壓力", f'{row["短期壓力"]:.2f}'),
+                ("中繼目標", f'{row["中繼目標"]:.2f}'),
+                ("突破目標", f'{row["突破目標"]:.2f}'),
+                ("風報比", f'{row["風報比"]:.2f}'),
+                ("結論", row["結論"]),
+                ("交易訊號", row["交易訊號"]),
+            ]
+            top_cols = st.columns(2 if st.session_state.mobile_mode else 3)
+            step = 2 if st.session_state.mobile_mode else 3
+            for i in range(0, len(core_top), step):
+                cols = st.columns(step)
+                for col, (label, value) in zip(cols, core_top[i:i + step]):
+                    col.metric(label, value)
+
+            st.markdown("#### 三大法人")
+            def _safe_lot_metric(value):
+                return fmt_lots(value)
+
+            def _safe_pct_metric(value):
+                num = safe_float_or_none(value)
+                return f"{num:.2f}%" if num is not None else "--"
+
+            inst_pairs = [
+                ("法人方向", row.get("法人方向", "--")),
+                ("法人共振", row.get("法人共振", "--")),
+                ("三大法人買賣超(張)", _safe_lot_metric(row.get("三大法人買賣超", None))),
+                ("法人佔成交量比%", _safe_pct_metric(row.get("法人佔成交量比%", None))),
+                ("外資買賣超(張)", _safe_lot_metric(row.get("外資買賣超", None))),
+                ("投信買賣超(張)", _safe_lot_metric(row.get("投信買賣超", None))),
+            ]
+            inst_cols_per_row = 2 if st.session_state.mobile_mode else 3
+            for i in range(0, len(inst_pairs), inst_cols_per_row):
+                cols = st.columns(inst_cols_per_row)
+                for col, (label, value) in zip(cols, inst_pairs[i:i+inst_cols_per_row]):
+                    col.metric(label, value)
+            raw_inst_debug = {
+                "三大法人買賣超_raw": row.get("三大法人買賣超", None),
+                "外資買賣超_raw": row.get("外資買賣超", None),
+                "投信買賣超_raw": row.get("投信買賣超", None),
+                "法人佔成交量比_raw": row.get("法人佔成交量比%", None),
+                "三大法人買賣超_parsed": safe_int_or_none(row.get("三大法人買賣超", None)),
+                "外資買賣超_parsed": safe_int_or_none(row.get("外資買賣超", None)),
+                "投信買賣超_parsed": safe_int_or_none(row.get("投信買賣超", None)),
+                "法人佔成交量比_parsed": safe_float_or_none(row.get("法人佔成交量比%", None)),
+            }
+            st.caption(row.get("法人摘要", "三大法人資料不足，暫不納入籌碼判讀。"))
+            with st.expander("法人抓取偵錯面板", expanded=(load_inst and str(row.get("法人方向", "")) == "資料不足")):
+                debug_rows = fetch_institutional_bundle_all().get("debug", []) if load_inst else []
+                hit_code = "是" if str(row.get("法人命中代碼", "否")) == "是" else "否"
+                d1, d2, d3 = st.columns(3)
+                d1.metric("本股代碼", str(st.session_state.selected_code or "").split(".")[0])
+                d2.metric("命中法人資料", hit_code)
+                d3.metric("最終採用來源", row.get("法人資料源", "NONE"))
+                st.caption("遇到資料不足時，直接看下面這張表：哪個來源有回資料、解析命中幾筆、最後採用哪個來源。")
+                if debug_rows:
+                    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("目前沒有可用的法人抓取偵錯資料。")
+                with st.expander("法人欄位值偵錯", expanded=False):
+                    st.json({k: ("--" if (isinstance(v, float) and pd.isna(v)) else v) for k, v in raw_inst_debug.items()})
+
+            st.markdown("#### 操作評級拆解")
+            df_chart = get_symbol_indicator_chart(st.session_state.selected_code)
+            breakdown = build_operation_rating_breakdown(df_chart, row.to_dict() if hasattr(row, "to_dict") else dict(row), market_info)
+            if st.session_state.mobile_mode:
+                bd1, bd2 = st.columns(2)
+                bd1.metric("基本分", str(breakdown["base_score"]))
+                bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
+                bd3, bd4 = st.columns(2)
+                bd3.metric("最終評分", str(breakdown["final_score"]))
+                bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+            else:
+                bd1, bd2, bd3, bd4 = st.columns(4)
+                bd1.metric("基本分", str(breakdown["base_score"]))
+                bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
+                bd3.metric("最終評分", str(breakdown["final_score"]))
+                bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+            score_df = pd.DataFrame(breakdown["base_items"] + breakdown["extra_items"])
+            with st.expander("展開評分加減明細", expanded=False):
+                st.dataframe(score_df, use_container_width=True, hide_index=True)
+            st.caption("評級順序：先算基本分，再加上大盤與法人分數，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
+            st.markdown("#### 策略區")
+            st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
+
+            with st.expander("做多策略", expanded=False):
+                long_pairs = [
+                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
+                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
+                    ("多方建議進場", f'{row["進場"]:.2f}'),
+                    ("多方停損", f'{row["停損"]:.2f}'),
+                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
+                    ("多方突破目標", f'{row["突破目標"]:.2f}')
+                ]
+                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(long_pairs), long_cols_per_row):
+                    cols = st.columns(long_cols_per_row)
+                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                        col.metric(label, value)
+
+            with st.expander("做空策略", expanded=False):
+                short_pairs = [
+                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
+                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
+                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
+                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
+                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
+                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+                ]
+                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(short_pairs), short_cols_per_row):
+                    cols = st.columns(short_cols_per_row)
+                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                        col.metric(label, value)
+                st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
+
+            render_reason_block(row, "本檔判斷理由")
+
+            st.markdown("#### 摘要重點")
+            st.info(row["摘要1"])
+            st.info(row["摘要2"])
+            st.info(row["摘要3"])
+            if row["交易訊號"] == "🔥進場":
+                st.success(f"操作建議：可列入優先觀察，重點看 {row['短期壓力']:.2f} 是否有效站上。")
+            elif row["交易訊號"] == "⏳等待":
+                st.warning(f"操作建議：先等突破或回測確認，不建議在 {row['收盤']:.2f} 直接追價。")
+            elif row["交易訊號"] == "❌不進":
+                st.error("操作建議：目前偏保守，先不進場，等待結構或燈號改善。")
+            else:
+                st.info("操作建議：可持續觀察量價與燈號變化，再決定是否列入候選。")
+
+        elif detail_view_mode == "技術細節":
+            tech_left, tech_right = (st.columns(2) if not st.session_state.mobile_mode else [st.container(), st.container()])
+            with tech_left:
+                st.markdown("#### 技術節奏")
+                tech_pairs = [
+                    ("星級", row["星級"]),
+                    ("操作評級", row["操作評級"]),
+                    ("KD-K", f'{row["KD_K"]:.1f}'),
+                    ("KD-D", f'{row["KD_D"]:.1f}'),
+                    ("KDJ-J", f'{_safe_float(row.get("KDJ_J")):.1f}' if _safe_float(row.get("KDJ_J")) is not None else "--"),
+                    ("5日乖離率", f'{row["乖離率5日"]:.2f}%'),
+                    ("MACD DIF", f'{_safe_float(row.get("MACD_DIF")):.2f}' if _safe_float(row.get("MACD_DIF")) is not None else "--"),
+                    ("MACD DEA", f'{_safe_float(row.get("MACD_DEA")):.2f}' if _safe_float(row.get("MACD_DEA")) is not None else "--"),
+                    ("MACD柱體", f'{_safe_float(row.get("MACD_BAR")):.2f}' if _safe_float(row.get("MACD_BAR")) is not None else "--"),
+                ]
+                tech_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(tech_pairs), tech_cols_per_row):
+                    cols = st.columns(tech_cols_per_row)
+                    for col, (label, value) in zip(cols, tech_pairs[i:i+tech_cols_per_row]):
+                        col.metric(label, value)
+                st.caption(f"KDJ判讀：{kdj_signal(row)}｜MACD判讀：{macd_signal(row)}")
+                st.markdown("#### 訊號燈號")
+                render_signal_lights(row)
+
+            with tech_right:
+                st.markdown("#### 量能觀察")
+                volume_pairs = [
+                    ("量比(5日)", f'{row["量比5日"]:.2f}'),
+                    ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'),
+                    ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'),
+                    ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%'),
+                    ("價量結論", row.get("價量結論", "")),
+                    ("價量燈號", row.get("價量燈號", "")),
+                ]
+                vol_cols_per_row = 2
+                for i in range(0, len(volume_pairs), vol_cols_per_row):
+                    cols = st.columns(vol_cols_per_row)
+                    for col, (label, value) in zip(cols, volume_pairs[i:i+vol_cols_per_row]):
+                        col.metric(label, value)
+
+            show_chart = st.toggle("載入圖表", value=False, key=f"show_chart_{st.session_state.selected_code}")
+            if show_chart:
+                df_chart = get_symbol_indicator_chart(st.session_state.selected_code)
+                chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
+                if chart_mode == "日K圖":
+                    st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
+                else:
+                    intra_df = download_intraday(st.session_state.selected_code)
+                    st.plotly_chart(make_intraday_figure(intra_df, row), use_container_width=True)
+            else:
+                st.caption("圖表預設不載入，切換股票會更快；需要時再手動開啟。")
+
+            show_news = st.toggle("載入短線重點資訊 / 最近標題", value=False, key=f"show_news_{st.session_state.selected_code}")
+            if show_news:
+                news_items = get_stock_news(st.session_state.selected_code)
+                summary_bullets = summarize_event_signals(row, news_items)
+                for b in summary_bullets:
+                    st.info(b)
+                if news_items:
+                    for item in news_items[:2]:
+                        title = item.get("title", "")
+                        meta = "｜".join([x for x in [item.get("publisher", ""), item.get("time", "")] if x])
+                        if item.get("link"):
+                            st.markdown(f"- [{title}]({item['link']})")
+                        else:
+                            st.write(f"- {title}")
+                        if meta:
+                            st.caption(meta)
+                else:
+                    st.caption("目前抓不到新聞資料，因此改以技術面與量價重點為主。")
+            else:
+                st.caption("新聞與事件摘要預設不載入，避免切換單股時額外等待。")
+
+        else:
+            with st.container(border=True):
+                st.markdown("#### 官方最新日資料")
+                if str(row.get("TWSE命中", "")) == "是":
+                    st.caption("收盤/收盤差異＝元；成交量＝張；成交值＝億元；成交筆數＝筆。缺值顯示為 --。")
+                    ta, tb, tc = st.columns(3)
+                    ta.metric("官方日期", fmt_text(row.get("TWSE日期", "")) or "--")
+                    tb.metric("官方收盤", fmt_price_with_unit(row.get("TWSE收盤", "")))
+                    tc.metric("收盤差異", fmt_price_with_unit(row.get("TWSE收盤差異", "")))
+                    td, te, tf = st.columns(3)
+                    td.metric("官方成交量", fmt_lots(row.get("TWSE成交量", "")))
+                    te.metric("官方成交值", fmt_trade_value_yi(row.get("TWSE成交值", "")))
+                    tf.metric("官方成交筆數", fmt_transactions(row.get("TWSE成交筆數", "")))
+                    st.caption(f'來源：{fmt_text(row.get("TWSE來源", "")) or "--"}')
+                else:
+                    st.info("這檔股票目前沒有命中官方日資料補資料。")
+
+                extra_pairs = [
+                    ("排名分組", row.get("排名分組", "--")),
+                    ("排名原因", row.get("排名原因", "--")),
+                    ("選股理由", row.get("選股理由", "--")),
+                    ("追價建議", row.get("追價建議", "--")),
+                ]
+                cols = st.columns(2 if st.session_state.mobile_mode else 4)
+                for col, (label, value) in zip(cols, extra_pairs):
+                    col.metric(label, value)
+
+
 render_global_banner()
 
 if st.session_state.current_page == "分析中心":
@@ -6214,14 +6712,18 @@ if st.session_state.current_page == "分析中心":
         with opm1:
             auto_pick_mode = st.selectbox("自動挑股模式", ["一般模式", "嚴格模式", "做空模式"], index=0)
         with opm2:
-            st.caption("一般模式：偏活躍/爆量/強勢題材；嚴格模式：偏低風險/高風報比/訊號乾淨；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
-            st.caption("V147 盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
+            candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
+        st.caption("一般模式：偏活躍/爆量/強勢題材；嚴格模式：偏低風險/高風報比/訊號乾淨；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("V170：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
+        st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
         op3, op4 = st.columns(2)
         manual_search = op3.button("搜尋", use_container_width=True)
         auto_pick = op4.button("自動挑股", use_container_width=True)
         if st.session_state.get("last_candidate_pool"):
-            st.caption(f"上次建立候選池：{len(st.session_state.get('last_candidate_pool', []))} 檔")
+            layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+            source_text = layer_meta.get("mode_label", "未記錄")
+            st.caption(f"上次建立候選池：{len(st.session_state.get('last_candidate_pool', []))} 檔｜來源：{source_text}")
 
     if manual_search:
         tmp = []
@@ -6237,9 +6739,23 @@ if st.session_state.current_page == "分析中心":
         st.session_state.last_liquidity_summary = {}
 
     if auto_pick:
-        with st.spinner("正在建立 250 檔候選池並執行自動挑股，請稍候..."):
-            active_candidate_pool = build_candidate_pool_250(name_map, max_price=1100.0, target_count=250)
+        with st.spinner("正在建立候選池並執行自動挑股，請稍候..."):
+            pool_layers = build_candidate_pool_layers(name_map, max_price=1100.0, expanded_target=250)
+            if candidate_pool_mode == "核心池（穩定優先）":
+                active_candidate_pool = pool_layers.get("core_pool", [])
+                mode_label = f"核心池（穩定優先）｜{pool_layers.get('core_count', 0)} 檔"
+            else:
+                active_candidate_pool = pool_layers.get("full_pool", [])
+                mode_label = f"核心池＋擴充池（250檔）｜核心 {pool_layers.get('core_count', 0)} 檔＋擴充 {pool_layers.get('expansion_count', 0)} 檔＝{pool_layers.get('full_count', 0)} 檔"
+
             st.session_state.last_candidate_pool = active_candidate_pool
+            st.session_state.last_candidate_pool_layer_meta = {
+                "mode_label": mode_label,
+                "selected_mode": candidate_pool_mode,
+                "core_count": pool_layers.get("core_count", 0),
+                "expansion_count": pool_layers.get("expansion_count", 0),
+                "full_count": pool_layers.get("full_count", 0),
+            }
             raw_candidates, engine_debug = analyze_candidate_pool_session(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
             st.session_state.last_candidate_engine_summary = engine_debug
 
@@ -6341,18 +6857,17 @@ if st.session_state.current_page == "分析中心":
         st.session_state.analysis_mode = "auto"
 
     results = st.session_state.results_data
-    twse_meta = {}
-    twse_hit_count = 0
-    if results:
-        results, twse_meta, twse_hit_count = try_apply_twse_hybrid(results)
-        st.session_state.results_data = results
+    twse_meta = load_cached_official_meta() if st.session_state.results_data else {}
+    twse_hit_count = sum(1 for r in (st.session_state.results_data or []) if str(dict(r).get("TWSE命中", "")) == "是")
     if not results:
         st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
     else:
         if st.session_state.analysis_mode == "manual":
             st.caption("目前模式：手動搜尋｜單股搜尋走獨立路徑，不會重跑 250 檔候選池；若該檔已在候選池分析過，會直接重用逐股快取。")
         elif st.session_state.analysis_mode == "auto":
-            st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池分析改成逐股快取＋失敗冷卻；首輪完成後再次切模式或重跑只重排、不重抓的比例會更高。")
+            layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+            source_text = layer_meta.get("mode_label", "未記錄")
+            st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池來源：{source_text}")
             if auto_pick_mode == "嚴格模式" and len(results) < top_n:
                 st.info(f"嚴格模式本次僅通過 {len(results)} 檔，未補滿 {top_n} 檔；系統不會自動用較鬆條件補齊，以避免混入品質較弱標的。")
         elif st.session_state.analysis_mode == "favorites":
@@ -6364,10 +6879,7 @@ if st.session_state.current_page == "分析中心":
         twm3.metric("官方來源狀態", str((twse_meta or {}).get("ssl_mode", "")))
         if (twse_meta or {}).get("hybrid_error"):
             st.caption(f'官方補資料已自動降級，不影響主分析：{(twse_meta or {}).get("hybrid_error")}')
-        if twse_hit_count == 0:
-            st.caption("目前沒有命中官方補資料；若上市或上櫃端點暫時異常，主分析仍會維持原本結果。")
-        else:
-            st.caption("這裡顯示的是 TWSE + TPEx 官方日資料命中結果；僅作補資料，不取代歷史 K 線。")
+        st.caption("分析中心已改成速度優先：這裡只顯示已快取的官方資料狀態，不再自動逐檔補資料；需要時請到市場儀表板或官方資料區查看。")
 
         df_result = pd.DataFrame(results)
         df_result = ensure_dataframe_columns(df_result, list(TWSE_RESULT_DEFAULTS.keys()))
@@ -6397,106 +6909,210 @@ if st.session_state.current_page == "分析中心":
                             st.session_state.analysis_mode = "favorites"
                             st.rerun()
 
+        result_mode_series = df_result["策略模式"].astype(str) if "策略模式" in df_result.columns else pd.Series([], dtype=str)
+        board_mode = "空方" if result_mode_series.str.contains("做空").any() else "多方"
+        is_short_board = board_mode == "空方"
+        df_result = ensure_dataframe_columns(df_result, ["空方風報比", "_bearish_hits", "空方建議進場", "空方停損", "空方短期壓力", "空方短期支撐", "空方中繼目標", "空方跌破目標"])
+
         with st.expander("策略與篩選", expanded=not st.session_state.mobile_mode):
-            ps1, ps2, ps3 = st.columns(3)
-            if ps1.button("偏多股", use_container_width=True):
-                st.session_state.preset_strategy = "bullish"
-            if ps2.button("量增股", use_container_width=True):
-                st.session_state.preset_strategy = "volume_up"
-            if ps3.button("高風報比", use_container_width=True):
-                st.session_state.preset_strategy = "high_rr"
-
-            ps4, ps5, ps6, ps7 = st.columns(4)
-            if ps4.button("突破觀察", use_container_width=True):
-                st.session_state.preset_strategy = "breakout_watch"
-            if ps5.button("低風險觀察", use_container_width=True):
-                st.session_state.preset_strategy = "low_risk"
-            if ps6.button("排除紅燈", use_container_width=True):
-                st.session_state.preset_strategy = "hide_red_only"
-            if ps7.button("取消策略", use_container_width=True):
-                st.session_state.preset_strategy = "none"
-
+            st.markdown(f"### {board_mode}策略與篩選")
+            st.caption("這一區已改成多空雙模式面板：做多看強勢延續，做空看弱勢結構、跌破與反彈不過壓力。常用條件放上面，進階條件收合避免版面太擠。")
             preset = st.session_state.preset_strategy
-            fl1, fl2 = st.columns(2)
-            trend_filter = fl1.selectbox("趨勢燈號", ["全部", "綠燈", "黃燈", "紅燈"], index=0)
-            signal_filter = fl2.selectbox("交易訊號", ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"], index=0)
-            fl3, fl4, fl5 = st.columns(3)
-            volume_filter = fl3.selectbox("量能條件", ["全部", "量增", "量縮", "量比>=1"], index=0)
-            min_rr = fl4.selectbox("最低風報比", ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"], index=0)
-            hide_red = fl5.checkbox("隱藏紅燈/不進", value=False)
-
-            if preset == "bullish":
-                trend_filter = "綠燈"; min_rr = ">=1.2"; hide_red = True
-            elif preset == "volume_up":
-                volume_filter = "量增"; min_rr = ">=1.0"
-            elif preset == "high_rr":
-                min_rr = ">=1.5"; hide_red = True
-            elif preset == "breakout_watch":
-                signal_filter = "⏳等待"; min_rr = ">=1.0"
-            elif preset == "low_risk":
-                trend_filter = "綠燈"; min_rr = ">=1.2"; volume_filter = "量比>=1"; hide_red = True
-            elif preset == "hide_red_only":
-                hide_red = True
-
             filtered_df = df_result.copy()
-            if trend_filter != "全部":
-                filtered_df = filtered_df[filtered_df["趨勢燈號"] == trend_filter]
-            if signal_filter != "全部":
-                filtered_df = filtered_df[filtered_df["交易訊號"] == signal_filter]
-            if volume_filter == "量增":
-                filtered_df = filtered_df[filtered_df["量能變化"] == "量增"]
-            elif volume_filter == "量縮":
-                filtered_df = filtered_df[filtered_df["量能變化"] == "量縮"]
-            elif volume_filter == "量比>=1":
-                filtered_df = filtered_df[filtered_df["量比5日"] >= 1]
-            if min_rr != "全部":
-                rr_value = float(min_rr.replace(">=", ""))
-                filtered_df = filtered_df[filtered_df["風報比"] >= rr_value]
-            if hide_red:
-                filtered_df = filtered_df[(filtered_df["進場燈號"] != "紅燈") & (filtered_df["交易訊號"] != "❌不進")]
 
-            preset_name_map = {
-                "none": "自訂",
-                "bullish": "偏多股",
-                "volume_up": "量增股",
-                "high_rr": "高風報比",
-                "breakout_watch": "突破觀察",
-                "low_risk": "低風險觀察",
-                "hide_red_only": "排除紅燈"
-            }
-            st.caption(f"目前預設策略：{preset_name_map.get(preset, '自訂')}")
+            if is_short_board:
+                ps1, ps2, ps3 = st.columns(3)
+                if ps1.button("偏空股", use_container_width=True):
+                    st.session_state.preset_strategy = "bearish"
+                if ps2.button("放量轉弱", use_container_width=True):
+                    st.session_state.preset_strategy = "weak_price_volume"
+                if ps3.button("高空方風報比", use_container_width=True):
+                    st.session_state.preset_strategy = "high_short_rr"
+                ps4, ps5, ps6, ps7 = st.columns(4)
+                if ps4.button("跌破觀察", use_container_width=True):
+                    st.session_state.preset_strategy = "breakdown_watch"
+                if ps5.button("反彈空", use_container_width=True):
+                    st.session_state.preset_strategy = "rebound_short"
+                if ps6.button("排除綠燈", use_container_width=True):
+                    st.session_state.preset_strategy = "hide_green_only"
+                if ps7.button("取消策略", use_container_width=True):
+                    st.session_state.preset_strategy = "none"
+
+                with st.expander("進階條件", expanded=False):
+                    fl1, fl2 = st.columns(2)
+                    conclusion_filter = fl1.selectbox("空方傾向", ["全部", "看空", "中性偏空", "中性"], index=0)
+                    signal_filter = fl2.selectbox("交易訊號", ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"], index=0)
+                    fl3, fl4, fl5 = st.columns(3)
+                    weak_filter = fl3.selectbox("弱勢型態", ["全部", "價跌量增", "開高走低爆量", "跳空下跌", "量縮", "量比>=1"], index=0)
+                    min_short_rr = fl4.selectbox("最低空方風報比", ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"], index=0)
+                    hits_filter = fl5.selectbox("最低弱勢訊號數", ["全部", ">=2", ">=3"], index=0)
+                    hide_green = st.checkbox("隱藏綠燈 / 偏多股", value=False)
+
+                if preset == "bearish":
+                    conclusion_filter = "看空"; min_short_rr = ">=1.2"; hide_green = True
+                elif preset == "weak_price_volume":
+                    weak_filter = "價跌量增"; min_short_rr = ">=1.0"
+                elif preset == "high_short_rr":
+                    min_short_rr = ">=1.5"; hits_filter = ">=2"
+                elif preset == "breakdown_watch":
+                    weak_filter = "跳空下跌"; hits_filter = ">=2"
+                elif preset == "rebound_short":
+                    conclusion_filter = "中性偏空"; min_short_rr = ">=1.2"
+                elif preset == "hide_green_only":
+                    hide_green = True
+
+                if conclusion_filter != "全部":
+                    filtered_df = filtered_df[filtered_df["結論"] == conclusion_filter]
+                if signal_filter != "全部":
+                    filtered_df = filtered_df[filtered_df["交易訊號"] == signal_filter]
+                if weak_filter in ["價跌量增", "開高走低爆量", "跳空下跌", "量縮"]:
+                    if weak_filter == "量縮":
+                        filtered_df = filtered_df[filtered_df["量能變化"] == "量縮"]
+                    else:
+                        filtered_df = filtered_df[filtered_df["價量結論"] == weak_filter]
+                elif weak_filter == "量比>=1":
+                    filtered_df = filtered_df[pd.to_numeric(filtered_df["量比5日"], errors="coerce") >= 1]
+                if min_short_rr != "全部":
+                    rr_value = float(min_short_rr.replace(">=", ""))
+                    filtered_df = filtered_df[pd.to_numeric(filtered_df["空方風報比"], errors="coerce") >= rr_value]
+                if hits_filter != "全部":
+                    hit_value = int(hits_filter.replace(">=", ""))
+                    filtered_df = filtered_df[pd.to_numeric(filtered_df["_bearish_hits"], errors="coerce").fillna(0) >= hit_value]
+                if hide_green:
+                    filtered_df = filtered_df[(filtered_df["價量燈號"] != "綠燈") & (~filtered_df["結論"].isin(["看多", "中性偏多"]))]
+
+                preset_name_map = {
+                    "none": "自訂",
+                    "bearish": "偏空股",
+                    "weak_price_volume": "放量轉弱",
+                    "high_short_rr": "高空方風報比",
+                    "breakdown_watch": "跌破觀察",
+                    "rebound_short": "反彈空",
+                    "hide_green_only": "排除綠燈",
+                }
+            else:
+                ps1, ps2, ps3 = st.columns(3)
+                if ps1.button("偏多股", use_container_width=True):
+                    st.session_state.preset_strategy = "bullish"
+                if ps2.button("量增股", use_container_width=True):
+                    st.session_state.preset_strategy = "volume_up"
+                if ps3.button("高風報比", use_container_width=True):
+                    st.session_state.preset_strategy = "high_rr"
+                ps4, ps5, ps6, ps7 = st.columns(4)
+                if ps4.button("突破觀察", use_container_width=True):
+                    st.session_state.preset_strategy = "breakout_watch"
+                if ps5.button("低風險觀察", use_container_width=True):
+                    st.session_state.preset_strategy = "low_risk"
+                if ps6.button("排除紅燈", use_container_width=True):
+                    st.session_state.preset_strategy = "hide_red_only"
+                if ps7.button("取消策略", use_container_width=True):
+                    st.session_state.preset_strategy = "none"
+
+                with st.expander("進階條件", expanded=False):
+                    fl1, fl2 = st.columns(2)
+                    trend_filter = fl1.selectbox("趨勢燈號", ["全部", "綠燈", "黃燈", "紅燈"], index=0)
+                    signal_filter = fl2.selectbox("交易訊號", ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"], index=0)
+                    fl3, fl4, fl5 = st.columns(3)
+                    volume_filter = fl3.selectbox("量能條件", ["全部", "量增", "量縮", "量比>=1"], index=0)
+                    min_rr = fl4.selectbox("最低風報比", ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"], index=0)
+                    hide_red = fl5.checkbox("隱藏紅燈 / 不進", value=False)
+
+                if preset == "bullish":
+                    trend_filter = "綠燈"; min_rr = ">=1.2"; hide_red = True
+                elif preset == "volume_up":
+                    volume_filter = "量增"; min_rr = ">=1.0"
+                elif preset == "high_rr":
+                    min_rr = ">=1.5"; hide_red = True
+                elif preset == "breakout_watch":
+                    signal_filter = "⏳等待"; min_rr = ">=1.0"
+                elif preset == "low_risk":
+                    trend_filter = "綠燈"; min_rr = ">=1.2"; volume_filter = "量比>=1"; hide_red = True
+                elif preset == "hide_red_only":
+                    hide_red = True
+
+                if trend_filter != "全部":
+                    filtered_df = filtered_df[filtered_df["趨勢燈號"] == trend_filter]
+                if signal_filter != "全部":
+                    filtered_df = filtered_df[filtered_df["交易訊號"] == signal_filter]
+                if volume_filter == "量增":
+                    filtered_df = filtered_df[filtered_df["量能變化"] == "量增"]
+                elif volume_filter == "量縮":
+                    filtered_df = filtered_df[filtered_df["量能變化"] == "量縮"]
+                elif volume_filter == "量比>=1":
+                    filtered_df = filtered_df[pd.to_numeric(filtered_df["量比5日"], errors="coerce") >= 1]
+                if min_rr != "全部":
+                    rr_value = float(min_rr.replace(">=", ""))
+                    filtered_df = filtered_df[pd.to_numeric(filtered_df["風報比"], errors="coerce") >= rr_value]
+                if hide_red:
+                    filtered_df = filtered_df[(filtered_df["進場燈號"] != "紅燈") & (filtered_df["交易訊號"] != "❌不進")]
+
+                preset_name_map = {
+                    "none": "自訂",
+                    "bullish": "偏多股",
+                    "volume_up": "量增股",
+                    "high_rr": "高風報比",
+                    "breakout_watch": "突破觀察",
+                    "low_risk": "低風險觀察",
+                    "hide_red_only": "排除紅燈",
+                }
+
+            st.caption(f"目前預設策略：{preset_name_map.get(preset, '自訂')}｜面板模式：{board_mode}")
 
         with st.expander("盤前候選股面板", expanded=not st.session_state.mobile_mode):
             panel_df = filtered_df.copy()
-            green_count = int((panel_df["趨勢燈號"] == "綠燈").sum()) if not panel_df.empty else 0
-            volume_up_count = int((panel_df["量能變化"] == "量增").sum()) if not panel_df.empty else 0
-            actionable_count = int(panel_df["交易訊號"].isin(["🔥進場", "👀觀察"]).sum()) if not panel_df.empty else 0
-            avg_rr = round(panel_df["風報比"].mean(), 2) if not panel_df.empty else 0.0
-
-            st.markdown("### 盤前候選股面板")
-            pc1, pc2 = st.columns(2)
-            pc1.metric("篩選後檔數", len(panel_df))
-            pc2.metric("綠燈數", green_count)
-            pc3, pc4 = st.columns(2)
-            pc3.metric("量增股數", volume_up_count)
-            pc4.metric("可優先觀察", actionable_count)
-            st.caption(f"篩選名單平均風報比：{avg_rr}")
+            st.markdown(f"### 盤前候選股面板｜{board_mode}")
+            layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+            if layer_meta:
+                st.caption(f"候選池來源：{layer_meta.get('mode_label', '未記錄')}")
+            if is_short_board:
+                bearish_count = int(panel_df["結論"].isin(["看空", "中性偏空"]).sum()) if not panel_df.empty else 0
+                weak_count = int(panel_df["價量結論"].isin(["價跌量增", "開高走低爆量", "跳空下跌"]).sum()) if not panel_df.empty else 0
+                high_rr_count = int((pd.to_numeric(panel_df["空方風報比"], errors="coerce") >= 1.5).sum()) if not panel_df.empty else 0
+                actionable_count = int((pd.to_numeric(panel_df["_bearish_hits"], errors="coerce").fillna(0) >= 2).sum()) if not panel_df.empty else 0
+                avg_rr = round(pd.to_numeric(panel_df["空方風報比"], errors="coerce").mean(), 2) if not panel_df.empty else 0.0
+                pc1, pc2, pc3, pc4 = st.columns(4)
+                pc1.metric("篩選後檔數", len(panel_df))
+                pc2.metric("偏空候選", bearish_count)
+                pc3.metric("弱勢價量", weak_count)
+                pc4.metric("反彈空 / 跌破觀察", actionable_count)
+                st.caption(f"篩選名單平均空方風報比：{avg_rr}｜高空方風報比檔數：{high_rr_count}")
+            else:
+                green_count = int((panel_df["趨勢燈號"] == "綠燈").sum()) if not panel_df.empty else 0
+                volume_up_count = int((panel_df["量能變化"] == "量增").sum()) if not panel_df.empty else 0
+                actionable_count = int(panel_df["交易訊號"].isin(["🔥進場", "👀觀察"]).sum()) if not panel_df.empty else 0
+                avg_rr = round(pd.to_numeric(panel_df["風報比"], errors="coerce").mean(), 2) if not panel_df.empty else 0.0
+                pc1, pc2, pc3, pc4 = st.columns(4)
+                pc1.metric("篩選後檔數", len(panel_df))
+                pc2.metric("綠燈數", green_count)
+                pc3.metric("量增股數", volume_up_count)
+                pc4.metric("可優先觀察", actionable_count)
+                st.caption(f"篩選名單平均風報比：{avg_rr}")
 
             if not panel_df.empty:
-                top_cards = panel_df.sort_values(["風報比", "量比5日"], ascending=[False, False]).head(3)
+                if is_short_board:
+                    top_cards = panel_df.sort_values(["空方風報比", "_auto_mode_score", "量比5日"], ascending=[False, False, False]).head(3)
+                else:
+                    top_cards = panel_df.sort_values(["風報比", "量比5日"], ascending=[False, False]).head(3)
                 st.markdown("#### TOP 候選")
                 top_cols = st.columns(1 if st.session_state.mobile_mode else 3)
                 if st.session_state.mobile_mode:
                     top_cols = [st.container(), st.container(), st.container()]
                 for col, (_, r) in zip(top_cols, top_cards.iterrows()):
                     with col:
+                        top_line_2 = f'{r["族群"]}｜{r["結論"]}｜{r["交易訊號"]}'
+                        if is_short_board:
+                            top_line_3 = f'空方風報比：{fmt_price(r.get("空方風報比"))}｜弱勢訊號：{int(r.get("_bearish_hits", 0) or 0)}'
+                            top_line_4 = f'空方壓力：{fmt_price(r.get("空方短期壓力"))}｜空方支撐：{fmt_price(r.get("空方短期支撐"))}'
+                        else:
+                            top_line_3 = f'風報比：{r["風報比"]}｜量比：{r["量比5日"]}'
+                            top_line_4 = f'支撐：{r["支撐"]}｜短壓：{r["短期壓力"]}'
                         st.markdown(
                             f"""
-                            <div style="border:1px solid #334155;border-radius:12px;padding:12px;background:#0b1220;margin-bottom:8px;">
+                            <div style="border:1px solid #334155;border-radius:12px;padding:12px;background:#0b1220;margin-bottom:8px;min-height:152px;">
                                 <div style="font-size:18px;font-weight:700;color:white;margin-bottom:8px;">{r["股票"]}</div>
-                                <div style="color:#cbd5e1;font-size:13px;margin-bottom:6px;">{r["族群"]}｜{r["結論"]}｜{r["交易訊號"]}</div>
-                                <div style="color:#cbd5e1;font-size:13px;">風報比：{r["風報比"]}｜量比：{r["量比5日"]}</div>
-                                <div style="color:#cbd5e1;font-size:13px;">支撐：{r["支撐"]}｜短壓：{r["短期壓力"]}</div>
+                                <div style="color:#cbd5e1;font-size:13px;margin-bottom:6px;">{top_line_2}</div>
+                                <div style="color:#cbd5e1;font-size:13px;">{top_line_3}</div>
+                                <div style="color:#cbd5e1;font-size:13px;">{top_line_4}</div>
                                 <div style="color:#93c5fd;font-size:13px;margin-top:6px;">{r["排名原因"]}</div>
                             </div>
                             """,
@@ -6504,27 +7120,43 @@ if st.session_state.current_page == "分析中心":
                         )
 
         with st.expander("總表分析", expanded=not st.session_state.mobile_mode):
-            st.markdown("### 總表分析")
+            st.markdown(f"### 總表分析｜{board_mode}")
             sort_c1, sort_c2 = st.columns([2, 3])
-            sort_options = {
-                "預設排名": ("_rank", False),
-                "風報比（高→低）": ("風報比", False),
-                "量比（高→低）": ("量比5日", False),
-                "KD-K（高→低）": ("KD_K", False),
-                "乖離率（高→低）": ("乖離率5日", False),
-                "乖離率（低→高）": ("乖離率5日", True),
-                "收盤價（高→低）": ("收盤", False),
-                "收盤價（低→高）": ("收盤", True),
-                "RSI（高→低）": ("RSI", False),
-                "量能變化%（高→低）": ("量能變化%", False),
-            }
+            if is_short_board:
+                sort_options = {
+                    "預設排名": ("_auto_mode_score", False),
+                    "空方風報比（高→低）": ("空方風報比", False),
+                    "弱勢訊號數（高→低）": ("_bearish_hits", False),
+                    "量比（高→低）": ("量比5日", False),
+                    "收盤價（高→低）": ("收盤", False),
+                    "收盤價（低→高）": ("收盤", True),
+                }
+            else:
+                sort_options = {
+                    "預設排名": ("_rank", False),
+                    "風報比（高→低）": ("風報比", False),
+                    "量比（高→低）": ("量比5日", False),
+                    "KD-K（高→低）": ("KD_K", False),
+                    "乖離率（高→低）": ("乖離率5日", False),
+                    "乖離率（低→高）": ("乖離率5日", True),
+                    "收盤價（高→低）": ("收盤", False),
+                    "收盤價（低→高）": ("收盤", True),
+                    "RSI（高→低）": ("RSI", False),
+                    "量能變化%（高→低）": ("量能變化%", False),
+                }
             sort_label = sort_c1.selectbox("總表排序方式", list(sort_options.keys()), index=0)
             sort_col, asc = sort_options[sort_label]
             sorted_df = filtered_df.sort_values(sort_col, ascending=asc).copy()
-            sort_c2.caption(f"目前排序：{sort_label}")
+            layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+            pool_caption = f"｜候選池：{layer_meta.get('selected_mode', '手動/未記錄')}" if layer_meta else ""
+            sort_c2.caption(f"目前排序：{sort_label}｜模式：{board_mode}{pool_caption}")
 
-            core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
-            detail_cols = ["支撐","排名分組","排名原因","RSI","KD_K","KD_D","KDJ_J","MACD_DIF","MACD_DEA","MACD_BAR","乖離率5日","量能變化","量能變化%","量比5日","TWSE日期","TWSE名稱","TWSE成交量","TWSE成交值","TWSE漲跌價差","TWSE成交筆數","TWSE收盤差異"]
+            if is_short_board:
+                core_cols = ["股票", "收盤", "空方建議進場", "空方停損", "空方短期壓力", "空方中繼目標", "空方風報比", "結論", "交易訊號"]
+                detail_cols = ["空方短期支撐", "空方跌破目標", "_bearish_hits", "價量結論", "價量燈號", "量能變化", "量能變化%", "量比5日", "排名分組", "排名原因", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值"]
+            else:
+                core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
+                detail_cols = ["支撐", "排名分組", "排名原因", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_DIF", "MACD_DEA", "MACD_BAR", "乖離率5日", "量能變化", "量能變化%", "量比5日", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值", "TWSE漲跌價差", "TWSE成交筆數", "TWSE收盤差異"]
             sorted_df = ensure_dataframe_columns(sorted_df, list(dict.fromkeys(core_cols + detail_cols)))
             st.dataframe(sorted_df[core_cols], use_container_width=True, hide_index=True)
 
@@ -6532,304 +7164,15 @@ if st.session_state.current_page == "分析中心":
                 detail_df = sorted_df[list(dict.fromkeys(core_cols + detail_cols))]
                 st.dataframe(detail_df, use_container_width=True, hide_index=True)
                 rank_df = sorted_df.copy()
-                rank_df.insert(0,"排名", range(1, len(rank_df)+1))
-                st.dataframe(rank_df[["排名","股票","排名分組","排名原因","星級","操作評級","結論","交易訊號","風報比","RSI","KD_K","KD_D","KDJ_J","MACD_BAR"]], use_container_width=True, hide_index=True)
+                rank_df.insert(0, "排名", range(1, len(rank_df) + 1))
+                if is_short_board:
+                    rank_cols = ["排名", "股票", "排名分組", "排名原因", "結論", "交易訊號", "空方風報比", "_bearish_hits", "價量結論", "量比5日"]
+                else:
+                    rank_cols = ["排名", "股票", "排名分組", "排名原因", "星級", "操作評級", "結論", "交易訊號", "風報比", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_BAR"]
+                st.dataframe(rank_df[rank_cols], use_container_width=True, hide_index=True)
 
         select_source = sorted_df if ("sorted_df" in locals() and not sorted_df.empty) else (filtered_df if not filtered_df.empty else df_result)
-        ensure_selected_code(select_source)
-        option_map = {row["股票"]: row["_code"] for _, row in select_source.iterrows()}
-        reverse_map = {v:k for k,v in option_map.items()}
-
-        with st.container(border=True):
-            st.markdown("### 單股詳細分析")
-            if st.session_state.mobile_mode:
-                labels = list(option_map.keys())
-                current_label = reverse_map.get(st.session_state.selected_code, labels[0])
-                selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label))
-                st.session_state.selected_code = option_map[selected_display]
-                nav1, nav2 = st.columns(2)
-                if nav1.button("上一檔", use_container_width=True):
-                    move_selected(select_source, -1)
-                    st.rerun()
-                if nav2.button("下一檔", use_container_width=True):
-                    move_selected(select_source, 1)
-                    st.rerun()
-                st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
-            else:
-                nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
-                with nav1:
-                    if st.button("上一檔", use_container_width=True):
-                        move_selected(select_source, -1)
-                with nav2:
-                    if st.button("下一檔", use_container_width=True):
-                        move_selected(select_source, 1)
-                with nav3:
-                    labels = list(option_map.keys())
-                    current_label = reverse_map.get(st.session_state.selected_code, labels[0])
-                    selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label))
-                    st.session_state.selected_code = option_map[selected_display]
-                with nav4:
-                    st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
-
-                st.markdown("#### 快速查看")
-                quick_cols = st.columns(min(5, len(select_source)))
-                top_quick = select_source.head(5)
-                for col, (_, quick_row) in zip(quick_cols, top_quick.iterrows()):
-                    if col.button(quick_row["股票"], use_container_width=True):
-                        st.session_state.selected_code = quick_row["_code"]
-                        st.rerun()
-
-            row = df_result[df_result["_code"] == st.session_state.selected_code].iloc[0].copy()
-            row = pd.Series(resolve_institutional_context(st.session_state.selected_code, row, fetch_institutional_bundle_all()))
-            df_chart = indicators(download_symbol(st.session_state.selected_code))
-
-            f1, f2 = st.columns([1,5])
-            with f1:
-                if st.session_state.selected_code not in st.session_state.favorites:
-                    if st.button("加入最愛"):
-                        st.session_state.favorites.append(st.session_state.selected_code)
-                        save_favorites(st.session_state.favorites)
-                        st.rerun()
-                else:
-                    if st.button("移除最愛"):
-                        st.session_state.favorites = [x for x in st.session_state.favorites if x != st.session_state.selected_code]
-                        save_favorites(st.session_state.favorites)
-                        st.rerun()
-            with f2:
-                if st.session_state.selected_code in st.session_state.favorites:
-                    st.success(f"{display_name(st.session_state.selected_code, name_map)} 已收藏到我的最愛。")
-
-            st.subheader(f"{reverse_map[st.session_state.selected_code]} 詳細分析")
-            st.caption("正式版閱讀順序：先看決策摘要，再看技術細節，最後看官方最新日資料。")
-
-            tab_decision, tab_tech, tab_official = st.tabs(["決策摘要", "技術細節", "官方資料"])
-
-            with tab_decision:
-                st.markdown("#### 核心摘要")
-                core_top = [
-                    ("收盤", f'{row["收盤"]:.2f}'),
-                    ("進場", f'{row["進場"]:.2f}'),
-                    ("停損", f'{row["停損"]:.2f}'),
-                    ("短期壓力", f'{row["短期壓力"]:.2f}'),
-                    ("中繼目標", f'{row["中繼目標"]:.2f}'),
-                    ("突破目標", f'{row["突破目標"]:.2f}'),
-                    ("風報比", f'{row["風報比"]:.2f}'),
-                    ("結論", row["結論"]),
-                    ("交易訊號", row["交易訊號"]),
-                ]
-                top_cols = st.columns(2 if st.session_state.mobile_mode else 3)
-                for i in range(0, len(core_top), len(top_cols)):
-                    cols = st.columns(2 if st.session_state.mobile_mode else 3)
-                    for col, (label, value) in zip(cols, core_top[i:i + (2 if st.session_state.mobile_mode else 3)]):
-                        col.metric(label, value)
-
-                st.markdown("#### 三大法人")
-                def _safe_lot_metric(value):
-                    return fmt_lots(value)
-
-                def _safe_pct_metric(value):
-                    num = safe_float_or_none(value)
-                    return f"{num:.2f}%" if num is not None else "--"
-
-                inst_pairs = [
-                    ("法人方向", row.get("法人方向", "--")),
-                    ("法人共振", row.get("法人共振", "--")),
-                    ("三大法人買賣超(張)", _safe_lot_metric(row.get("三大法人買賣超", None))),
-                    ("法人佔成交量比%", _safe_pct_metric(row.get("法人佔成交量比%", None))),
-                    ("外資買賣超(張)", _safe_lot_metric(row.get("外資買賣超", None))),
-                    ("投信買賣超(張)", _safe_lot_metric(row.get("投信買賣超", None))),
-                ]
-                inst_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(inst_pairs), inst_cols_per_row):
-                    cols = st.columns(inst_cols_per_row)
-                    for col, (label, value) in zip(cols, inst_pairs[i:i+inst_cols_per_row]):
-                        col.metric(label, value)
-                raw_inst_debug = {
-                    "三大法人買賣超_raw": row.get("三大法人買賣超", None),
-                    "外資買賣超_raw": row.get("外資買賣超", None),
-                    "投信買賣超_raw": row.get("投信買賣超", None),
-                    "法人佔成交量比_raw": row.get("法人佔成交量比%", None),
-                    "三大法人買賣超_parsed": safe_int_or_none(row.get("三大法人買賣超", None)),
-                    "外資買賣超_parsed": safe_int_or_none(row.get("外資買賣超", None)),
-                    "投信買賣超_parsed": safe_int_or_none(row.get("投信買賣超", None)),
-                    "法人佔成交量比_parsed": safe_float_or_none(row.get("法人佔成交量比%", None)),
-                }
-                st.caption(row.get("法人摘要", "三大法人資料不足，暫不納入籌碼判讀。"))
-                with st.expander("法人抓取偵錯面板", expanded=(str(row.get("法人方向", "")) == "資料不足")):
-                    debug_rows = fetch_institutional_bundle_all().get("debug", [])
-                    hit_code = "是" if str(row.get("法人命中代碼", "否")) == "是" else "否"
-                    d1, d2, d3 = st.columns(3)
-                    d1.metric("本股代碼", str(st.session_state.selected_code or "").split(".")[0])
-                    d2.metric("命中法人資料", hit_code)
-                    d3.metric("最終採用來源", row.get("法人資料源", "NONE"))
-                    st.caption("遇到資料不足時，直接看下面這張表：哪個來源有回資料、解析命中幾筆、最後採用哪個來源。這版開始不再先拆修，直接把偵錯資訊攤開。")
-                    if debug_rows:
-                        st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
-                    else:
-                        st.info("目前沒有可用的法人抓取偵錯資料。")
-                    with st.expander("法人欄位值偵錯", expanded=False):
-                        st.json({k: ("--" if (isinstance(v, float) and pd.isna(v)) else v) for k, v in raw_inst_debug.items()})
-
-                st.markdown("#### 操作評級拆解")
-                breakdown = build_operation_rating_breakdown(df_chart, row.to_dict() if hasattr(row, "to_dict") else dict(row), market_info)
-                if st.session_state.mobile_mode:
-                    bd1, bd2 = st.columns(2)
-                    bd1.metric("基本分", str(breakdown["base_score"]))
-                    bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
-                    bd3, bd4 = st.columns(2)
-                    bd3.metric("最終評分", str(breakdown["final_score"]))
-                    bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
-                else:
-                    bd1, bd2, bd3, bd4 = st.columns(4)
-                    bd1.metric("基本分", str(breakdown["base_score"]))
-                    bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
-                    bd3.metric("最終評分", str(breakdown["final_score"]))
-                    bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
-                score_df = pd.DataFrame(breakdown["base_items"] + breakdown["extra_items"])
-                with st.expander("展開評分加減明細", expanded=False):
-                    st.dataframe(score_df, use_container_width=True, hide_index=True)
-                st.caption("評級順序：先算基本分，再加上大盤與法人分數，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
-                st.markdown("#### 策略區")
-                st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
-
-                with st.expander("做多策略", expanded=False):
-                    long_pairs = [
-                        ("多方短期支撐", f'{row["支撐"]:.2f}'),
-                        ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
-                        ("多方建議進場", f'{row["進場"]:.2f}'),
-                        ("多方停損", f'{row["停損"]:.2f}'),
-                        ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
-                        ("多方突破目標", f'{row["突破目標"]:.2f}')
-                    ]
-                    long_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                    for i in range(0, len(long_pairs), long_cols_per_row):
-                        cols = st.columns(long_cols_per_row)
-                        for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
-                            col.metric(label, value)
-
-                with st.expander("做空策略", expanded=False):
-                    short_pairs = [
-                        ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
-                        ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
-                        ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
-                        ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
-                        ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
-                        ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
-                    ]
-                    short_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                    for i in range(0, len(short_pairs), short_cols_per_row):
-                        cols = st.columns(short_cols_per_row)
-                        for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
-                            col.metric(label, value)
-                    st.caption("空方策略正式版：以現有壓力/支撐/收盤結構，獨立推導空方壓力、空方支撐、空方建議進場、空方停損與下方目標。")
-
-                render_reason_block(row, "本檔判斷理由")
-
-                st.markdown("#### 摘要重點")
-                st.info(row["摘要1"])
-                st.info(row["摘要2"])
-                st.info(row["摘要3"])
-                if row["交易訊號"] == "🔥進場":
-                    st.success(f"操作建議：可列入優先觀察，重點看 {row['短期壓力']:.2f} 是否有效站上。")
-                elif row["交易訊號"] == "⏳等待":
-                    st.warning(f"操作建議：先等突破或回測確認，不建議在 {row['收盤']:.2f} 直接追價。")
-                elif row["交易訊號"] == "❌不進":
-                    st.error("操作建議：目前偏保守，先不進場，等待結構或燈號改善。")
-                else:
-                    st.info("操作建議：可持續觀察量價與燈號變化，再決定是否列入候選。")
-
-            with tab_tech:
-                tech_left, tech_right = (st.columns(2) if not st.session_state.mobile_mode else [st.container(), st.container()])
-                with tech_left:
-                    st.markdown("#### 技術節奏")
-                    tech_pairs = [
-                        ("星級", row["星級"]),
-                        ("操作評級", row["操作評級"]),
-                        ("KD-K", f'{row["KD_K"]:.1f}'),
-                        ("KD-D", f'{row["KD_D"]:.1f}'),
-                        ("KDJ-J", f'{_safe_float(row.get("KDJ_J")):.1f}' if _safe_float(row.get("KDJ_J")) is not None else "--"),
-                        ("5日乖離率", f'{row["乖離率5日"]:.2f}%'),
-                        ("MACD DIF", f'{_safe_float(row.get("MACD_DIF")):.2f}' if _safe_float(row.get("MACD_DIF")) is not None else "--"),
-                        ("MACD DEA", f'{_safe_float(row.get("MACD_DEA")):.2f}' if _safe_float(row.get("MACD_DEA")) is not None else "--"),
-                        ("MACD柱體", f'{_safe_float(row.get("MACD_BAR")):.2f}' if _safe_float(row.get("MACD_BAR")) is not None else "--"),
-                    ]
-                    tech_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                    for i in range(0, len(tech_pairs), tech_cols_per_row):
-                        cols = st.columns(tech_cols_per_row)
-                        for col, (label, value) in zip(cols, tech_pairs[i:i+tech_cols_per_row]):
-                            col.metric(label, value)
-                    st.caption(f"KDJ判讀：{kdj_signal(row)}｜MACD判讀：{macd_signal(row)}")
-                    st.markdown("#### 訊號燈號")
-                    render_signal_lights(row)
-
-                with tech_right:
-                    st.markdown("#### 量能觀察")
-                    volume_pairs = [
-                        ("量比(5日)", f'{row["量比5日"]:.2f}'),
-                        ("今日成交量(張)", f'{round(float(row["成交量"])/1000):,}'),
-                        ("昨日成交量(張)", f'{round(float(row["昨量"])/1000):,}'),
-                        ("量能變化", f'{row["量能變化"]} {row["量能變化%"]:+.2f}%'),
-                        ("價量結論", row.get("價量結論", "")),
-                        ("價量燈號", row.get("價量燈號", "")),
-                    ]
-                    vol_cols_per_row = 2
-                    for i in range(0, len(volume_pairs), vol_cols_per_row):
-                        cols = st.columns(vol_cols_per_row)
-                        for col, (label, value) in zip(cols, volume_pairs[i:i+vol_cols_per_row]):
-                            col.metric(label, value)
-
-                with st.expander("展開圖表", expanded=not st.session_state.mobile_mode):
-                    chart_mode = st.radio("圖表模式", ["日K圖", "當日走勢圖"], horizontal=True, key=f"chart_mode_{st.session_state.selected_code}")
-                    if chart_mode == "日K圖":
-                        st.plotly_chart(make_candle_figure(df_chart, row), use_container_width=True)
-                    else:
-                        intra_df = download_intraday(st.session_state.selected_code)
-                        st.plotly_chart(make_intraday_figure(intra_df, row), use_container_width=True)
-
-                with st.expander("短線重點資訊 / 最近標題", expanded=False):
-                    news_items = get_stock_news(st.session_state.selected_code)
-                    summary_bullets = summarize_event_signals(row, news_items)
-                    for b in summary_bullets:
-                        st.info(b)
-                    if news_items:
-                        for item in news_items[:2]:
-                            title = item.get("title", "")
-                            meta = "｜".join([x for x in [item.get("publisher", ""), item.get("time", "")] if x])
-                            if item.get("link"):
-                                st.markdown(f"- [{title}]({item['link']})")
-                            else:
-                                st.write(f"- {title}")
-                            if meta:
-                                st.caption(meta)
-                    else:
-                        st.caption("目前抓不到新聞資料，因此改以技術面與量價重點為主。")
-
-            with tab_official:
-                with st.container(border=True):
-                    st.markdown("#### 官方最新日資料")
-                    if str(row.get("TWSE命中", "")) == "是":
-                        st.caption("收盤/收盤差異＝元；成交量＝張；成交值＝億元；成交筆數＝筆。缺值顯示為 --。")
-                        ta, tb, tc = st.columns(3)
-                        ta.metric("官方日期", fmt_text(row.get("TWSE日期", "")) or "--")
-                        tb.metric("官方收盤", fmt_price_with_unit(row.get("TWSE收盤", "")))
-                        tc.metric("收盤差異", fmt_price_with_unit(row.get("TWSE收盤差異", "")))
-                        td, te, tf = st.columns(3)
-                        td.metric("官方成交量", fmt_lots(row.get("TWSE成交量", "")))
-                        te.metric("官方成交值", fmt_trade_value_yi(row.get("TWSE成交值", "")))
-                        tf.metric("官方成交筆數", fmt_transactions(row.get("TWSE成交筆數", "")))
-                        st.caption(f'來源：{fmt_text(row.get("TWSE來源", "")) or "--"}')
-                    else:
-                        st.info("這檔股票目前沒有命中官方日資料補資料。")
-
-                    extra_pairs = [
-                        ("排名分組", row.get("排名分組", "--")),
-                        ("排名原因", row.get("排名原因", "--")),
-                        ("選股理由", row.get("選股理由", "--")),
-                        ("追價建議", row.get("追價建議", "--")),
-                    ]
-                    cols = st.columns(2 if st.session_state.mobile_mode else 4)
-                    for col, (label, value) in zip(cols, extra_pairs):
-                        col.metric(label, value)
+        render_single_stock_detail_panel(select_source, df_result, name_map, market_info)
 
 
 
