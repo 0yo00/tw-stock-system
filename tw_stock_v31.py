@@ -7357,13 +7357,18 @@ if st.session_state.current_page == "分析中心":
 
             elif auto_pick_mode == "嚴格模式":
                 candidates = []
+                fallback_pool = []
                 for item in source_candidates:
-                    if not is_intraday_long_candidate(item, strict=True):
-                        continue
                     item = item.copy()
                     item["策略模式"] = "嚴格模式"
                     item["_auto_mode_score"] = auto_pick_strict_score(item)
+                    fallback_pool.append(item)
+                    if not is_intraday_long_candidate(item, strict=True):
+                        continue
                     candidates.append(item)
+                if not candidates:
+                    candidates = fallback_pool
+                    st.warning(f"嚴格模式篩選後無完全符合的標的，已自動降級顯示通過流動性的 {len(fallback_pool)} 檔（依分數排序）。")
                 candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
             elif auto_pick_mode == "做空模式":
                 short_candidates = []
@@ -7383,18 +7388,21 @@ if st.session_state.current_page == "分析中心":
                 candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
             else:
                 candidates = []
+                fallback_pool = []
                 for item in source_candidates:
-                    if not is_intraday_long_candidate(item, strict=False):
-                        continue
                     item = item.copy()
                     item["策略模式"] = "一般模式"
                     item["_auto_mode_score"] = auto_pick_general_score(item)
+                    fallback_pool.append(item)
+                    if not is_intraday_long_candidate(item, strict=False):
+                        continue
                     candidates.append(item)
+                if not candidates:
+                    candidates = fallback_pool
+                    st.warning(f"一般模式篩選後無完全符合的標的（大盤偏空），已自動降級顯示通過流動性的 {len(fallback_pool)} 檔（依分數排序）。")
                 candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
 
             if source_candidates:
-                if not candidates:
-                    st.warning(f"通過流動性門檻的 {len(source_candidates)} 檔，在「{auto_pick_mode}」篩選後無符合條件的標的，請嘗試切換模式或放寬條件。")
                 st.session_state.results_data = candidates[:top_n]
                 st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
                 st.session_state.analysis_mode = "auto"
