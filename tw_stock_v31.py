@@ -944,9 +944,49 @@ def _apply_official_latest_bar(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
     return normalize_df(df)
 
 
+def _patch_today_nan_row(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    last_close = df["Close"].iloc[-1] if "Close" in df.columns else None
+    try:
+        if last_close is not None and pd.notna(last_close):
+            return df
+    except Exception:
+        return df
+    try:
+        ticker = yf.Ticker(symbol.strip())
+        fi = ticker.fast_info
+        price = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
+        prev = getattr(fi, "previous_close", None) or getattr(fi, "previousClose", None)
+        if price is None or not isinstance(price, (int, float)) or price <= 0:
+            return df
+        intra = ticker.history(period="1d", interval="1m")
+        if intra is not None and not intra.empty:
+            today_open = float(intra["Open"].iloc[0])
+            today_high = float(intra["High"].max())
+            today_low = float(intra["Low"].min())
+            today_close = float(intra["Close"].iloc[-1])
+            today_vol = int(intra["Volume"].sum())
+        else:
+            today_open = price
+            today_high = price
+            today_low = price
+            today_close = price
+            today_vol = 0
+        df.loc[df.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+            today_open, today_high, today_low, today_close, today_vol
+        ]
+    except Exception:
+        pass
+    return df
+
 @st.cache_data(ttl=600, show_spinner=False)
 def download_symbol(symbol: str) -> pd.DataFrame:
     df = yf.download(symbol.strip(), period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    if df is not None and not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df = _patch_today_nan_row(symbol, df)
     df = normalize_df(df)
     return _apply_official_latest_bar(symbol, df)
 
