@@ -3,6 +3,8 @@ import pandas as pd
 
 
 def market_bias(df: pd.DataFrame):
+    if len(df) < 2:
+        return "中性（等待確認）"
     prev_close = float(df["Close"].iloc[-2])
     last_close = float(df["Close"].iloc[-1])
     change = (last_close - prev_close) / prev_close if prev_close else 0
@@ -173,13 +175,20 @@ def price_volume_analysis(df: pd.DataFrame):
     return "量價中性", "黃燈", ["價量沒有明顯共振", "暫以觀察為主", "等待更多確認"]
 
 
+def _safe_float(val, default=0.0):
+    import math
+    try:
+        f = float(val) if val is not None and val != "" else default
+        return default if math.isnan(f) or math.isinf(f) else f
+    except (ValueError, TypeError):
+        return default
+
 def build_short_strategy(row: dict):
     try:
-        close = float(row.get("收盤", 0) or 0)
-        support = float(row.get("支撐", 0) or 0)
-        resistance = float(row.get("短期壓力", 0) or 0)
-        breakout = float(row.get("突破目標", 0) or 0)
-        mid = float(row.get("中繼目標", 0) or 0)
+        close = _safe_float(row.get("收盤", 0))
+        support = _safe_float(row.get("支撐", 0))
+        resistance = _safe_float(row.get("短期壓力", 0))
+        breakout = _safe_float(row.get("突破目標", 0))
     except Exception:
         return {
             "空方短期壓力": "",
@@ -275,8 +284,10 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
         entry = max(support + atr * 0.3, close - atr * 0.35)
     entry = round(float(min(entry, close * 0.995)), 2)
     stop = round(float(support - atr * 0.25), 2)
+    if stop >= entry:
+        stop = round(entry - max(atr * 0.25, 0.01), 2)
     short_target = resistance
-    rr = round((short_target - entry) / max(entry - stop, 0.01), 2)
+    rr = max(0.0, round((short_target - entry) / max(entry - stop, 0.01), 2))
 
     star, action_label = decision_star_and_action(score, breakout_status, breakout_strength, rr, bias)
     conclusion = trend_conclusion(action_label, breakout_status, bias)
@@ -332,10 +343,11 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
         "排名分組": bucket, "排名原因": rank_reason(bucket, conclusion, signal),
         "盤前建議": bias, "突破狀態": breakout_status, "突破強度": breakout_strength, "追價建議": chase,
         "進場": entry, "停損": stop, "目標": short_target, "風報比": rr, "ATR": atr,
-        "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1), "KDJ_J": round(float(df["j"].iloc[-1]), 1) if pd.notna(df["j"].iloc[-1]) else 50.0,
-        "MACD_DIF": round(float(df["macd_dif"].iloc[-1]), 2) if pd.notna(df["macd_dif"].iloc[-1]) else 0.0,
-        "MACD_DEA": round(float(df["macd_dea"].iloc[-1]), 2) if pd.notna(df["macd_dea"].iloc[-1]) else 0.0,
-        "MACD_BAR": round(float(df["macd_bar"].iloc[-1]), 2) if pd.notna(df["macd_bar"].iloc[-1]) else 0.0,
+        "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1),
+        "KDJ_J": round(float(df["j"].iloc[-1]), 1) if "j" in df.columns and pd.notna(df["j"].iloc[-1]) else 50.0,
+        "MACD_DIF": round(float(df["macd_dif"].iloc[-1]), 2) if "macd_dif" in df.columns and pd.notna(df["macd_dif"].iloc[-1]) else 0.0,
+        "MACD_DEA": round(float(df["macd_dea"].iloc[-1]), 2) if "macd_dea" in df.columns and pd.notna(df["macd_dea"].iloc[-1]) else 0.0,
+        "MACD_BAR": round(float(df["macd_bar"].iloc[-1]), 2) if "macd_bar" in df.columns and pd.notna(df["macd_bar"].iloc[-1]) else 0.0,
         "乖離率5日": round(bias5, 2),
         "成交量": int(vol), "昨量": int(vol_prev), "量比5日": vol_ratio, "量能變化": vol_trend, "量能變化%": vol_change_pct,
         "價量結論": pv_label, "價量燈號": pv_light, "價量理由": "｜".join(pv_reasons),

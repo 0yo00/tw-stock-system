@@ -1465,23 +1465,6 @@ def _fetch_twse_openapi_rows_v137(endpoint: str):
     return rows, attempts
 
 
-def _inst_row_value(row: dict, *keys):
-    if not isinstance(row, dict):
-        return None
-    normalized = {}
-    for k, v in row.items():
-        nk = _normalize_label(k)
-        if nk and nk not in normalized:
-            normalized[nk] = v
-    for key in keys:
-        if key in row:
-            return row.get(key)
-        nk = _normalize_label(key)
-        if nk in normalized:
-            return normalized.get(nk)
-    return None
-
-
 def _parse_institutional_result(rows):
     result = {}
     matched_rows = 0
@@ -2231,7 +2214,6 @@ def _extract_rows_from_rwd_json(data):
         return rows
 
     def append_rows(fields, data_rows, table_title=""):
-        nonlocal rows
         if not isinstance(fields, list) or not isinstance(data_rows, list):
             return
         for raw in data_rows:
@@ -3766,13 +3748,19 @@ def pair_trades(trades):
 
         for r in sorted(rows, key=lambda x: str(x.get("時間", ""))):
             act = str(r.get("動作", ""))
-            qty = int(r.get("數量", 0) or 0)
+            try:
+                qty = int(float(r.get("數量", 0) or 0))
+            except (ValueError, TypeError):
+                continue
             if qty <= 0:
                 continue
 
             if act == open_action:
                 rec = dict(r)
-                rec["剩餘數量"] = int(rec.get("剩餘數量", qty) or qty)
+                try:
+                    rec["剩餘數量"] = int(float(rec.get("剩餘數量", qty) or qty))
+                except (ValueError, TypeError):
+                    rec["剩餘數量"] = qty
                 opens.append(rec)
             elif act == close_action:
                 qty_to_close = qty
@@ -4405,7 +4393,7 @@ def _roc_to_ad(date_text: str) -> str:
     return s
 
 
-def _flatten_columns(columns):
+def _flatten_columns_list(columns):
     flat = []
     for col in columns:
         if isinstance(col, tuple):
@@ -4541,7 +4529,7 @@ def _parse_tpex_html_table(text: str) -> pd.DataFrame:
         return pd.DataFrame()
     for t in tables:
         tt = t.copy()
-        tt.columns = _flatten_columns(tt.columns)
+        tt.columns = _flatten_columns_list(tt.columns)
         cols = set(tt.columns)
         if {"代號", "名稱", "收盤"}.issubset(cols) and ("成交股數" in cols or "成交股數(股)" in cols):
             return tt
@@ -6917,16 +6905,19 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         st.markdown("### 單股詳細分析")
         labels = list(option_map.keys())
         current_label = reverse_map.get(st.session_state.selected_code, labels[0])
+        current_index = labels.index(current_label) if current_label in labels else 0
 
         if st.session_state.mobile_mode:
-            selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label), key="detail_select_mobile")
+            selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile")
             st.session_state.selected_code = option_map[selected_display]
             nav1, nav2 = st.columns(2)
             if nav1.button("上一檔", use_container_width=True, key="detail_prev_mobile"):
                 move_selected(select_source, -1)
             if nav2.button("下一檔", use_container_width=True, key="detail_next_mobile"):
                 move_selected(select_source, 1)
-            st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
+            code_values = list(option_map.values())
+            pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
+            st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
         else:
             nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
             with nav1:
@@ -6936,10 +6927,12 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 if st.button("下一檔", use_container_width=True, key="detail_next_pc"):
                     move_selected(select_source, 1)
             with nav3:
-                selected_display = st.selectbox("選擇查看單股", labels, index=labels.index(current_label), key="detail_select_pc")
+                selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_pc")
                 st.session_state.selected_code = option_map[selected_display]
             with nav4:
-                st.caption(f"目前位置：{list(option_map.values()).index(st.session_state.selected_code)+1} / {len(option_map)}")
+                code_values = list(option_map.values())
+                pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
+                st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
 
             st.markdown("#### 快速查看")
             quick_cols = st.columns(min(5, len(select_source)))
@@ -6948,7 +6941,11 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 if col.button(quick_row["股票"], use_container_width=True, key=f"quick_{quick_row['_code']}"):
                     st.session_state.selected_code = quick_row["_code"]
 
-        row = df_result[df_result["_code"] == st.session_state.selected_code].iloc[0].copy()
+        _matched = df_result[df_result["_code"] == st.session_state.selected_code]
+        if _matched.empty:
+            st.warning("選取的股票不在目前結果中，請重新選擇。")
+            return
+        row = _matched.iloc[0].copy()
 
         f1, f2 = st.columns([1,5])
         with f1:
@@ -7280,126 +7277,154 @@ if st.session_state.current_page == "分析中心":
         st.session_state.last_liquidity_summary = {}
 
     if auto_pick:
-        with st.spinner("正在建立候選池並執行自動挑股，請稍候..."):
-            pool_layers = build_candidate_pool_layers(name_map, max_price=1100.0, expanded_target=250)
-            if candidate_pool_mode == "核心池（穩定優先）":
-                active_candidate_pool = pool_layers.get("core_pool", [])
-                mode_label = f"核心池（穩定優先）｜{pool_layers.get('core_count', 0)} 檔"
-            else:
-                active_candidate_pool = pool_layers.get("full_pool", [])
-                mode_label = f"核心池＋擴充池（250檔）｜核心 {pool_layers.get('core_count', 0)} 檔＋擴充 {pool_layers.get('expansion_count', 0)} 檔＝{pool_layers.get('full_count', 0)} 檔"
+        try:
+            with st.spinner("正在建立候選池並執行自動挑股，請稍候..."):
+                pool_layers = build_candidate_pool_layers(name_map, max_price=1100.0, expanded_target=250)
+                if candidate_pool_mode == "核心池（穩定優先）":
+                    active_candidate_pool = pool_layers.get("core_pool", [])
+                    mode_label = f"核心池（穩定優先）｜{pool_layers.get('core_count', 0)} 檔"
+                else:
+                    active_candidate_pool = pool_layers.get("full_pool", [])
+                    mode_label = f"核心池＋擴充池（250檔）｜核心 {pool_layers.get('core_count', 0)} 檔＋擴充 {pool_layers.get('expansion_count', 0)} 檔＝{pool_layers.get('full_count', 0)} 檔"
 
-            st.session_state.last_candidate_pool = active_candidate_pool
-            st.session_state.last_candidate_pool_layer_meta = {
-                "mode_label": mode_label,
-                "selected_mode": candidate_pool_mode,
-                "core_count": pool_layers.get("core_count", 0),
-                "expansion_count": pool_layers.get("expansion_count", 0),
-                "full_count": pool_layers.get("full_count", 0),
-            }
-            raw_candidates, engine_debug = analyze_candidate_pool_session(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
-            st.session_state.last_candidate_engine_summary = engine_debug
-
-        liquidity_passed = [x for x in raw_candidates if liquidity_pass(x)]
-        liquidity_filtered = [x for x in raw_candidates if not liquidity_pass(x)]
-        st.session_state.last_liquidity_summary = {
-            "raw_count": len(raw_candidates),
-            "passed_count": len(liquidity_passed),
-            "filtered_count": len(liquidity_filtered),
-            "top_reasons": [f"{x.get('股票','')}｜{liquidity_penalty_reason(x)}" for x in liquidity_filtered[:10]],
-            "missing_liq_count": sum(1 for x in raw_candidates if "流動性達標" not in x),
-            "debug_rows": [
-                {
-                    "股票": x.get("股票", x.get("_code", "")),
-                    "流動性達標": x.get("流動性達標", "<缺漏>"),
-                    "流動性結論": x.get("流動性結論", "<缺漏>"),
-                    "流動性摘要": x.get("流動性摘要", "<缺漏>"),
-                    "流動性排除原因": x.get("流動性排除原因", "<缺漏>"),
+                st.session_state.last_candidate_pool = active_candidate_pool
+                st.session_state.last_candidate_pool_layer_meta = {
+                    "mode_label": mode_label,
+                    "selected_mode": candidate_pool_mode,
+                    "core_count": pool_layers.get("core_count", 0),
+                    "expansion_count": pool_layers.get("expansion_count", 0),
+                    "full_count": pool_layers.get("full_count", 0),
                 }
-                for x in raw_candidates[:20]
-            ],
-        }
-        source_candidates = liquidity_passed
+                raw_candidates, engine_debug = analyze_candidate_pool_session(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
+                st.session_state.last_candidate_engine_summary = engine_debug
 
-        if not source_candidates:
-            st.warning("本次候選池全部被盤前流動性門檻排除，請放寬條件或改用手動搜尋。")
-            liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
-            with st.expander("查看盤前流動性排除偵錯", expanded=True):
-                dm1, dm2, dm3 = st.columns(3)
-                dm1.metric("候選池分析數", liq_summary.get("raw_count", 0))
-                dm2.metric("通過流動性門檻", liq_summary.get("passed_count", 0))
-                dm3.metric("缺漏流動性欄位", liq_summary.get("missing_liq_count", 0))
-                reasons = liq_summary.get("top_reasons", [])
-                if reasons:
-                    st.caption("前幾個排除原因：")
-                    for r in reasons:
-                        st.write(f"- {r}")
-                debug_rows = liq_summary.get("debug_rows", [])
-                if debug_rows:
-                    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
+            liquidity_passed = [x for x in raw_candidates if liquidity_pass(x)]
+            liquidity_filtered = [x for x in raw_candidates if not liquidity_pass(x)]
+            st.session_state.last_liquidity_summary = {
+                "raw_count": len(raw_candidates),
+                "passed_count": len(liquidity_passed),
+                "filtered_count": len(liquidity_filtered),
+                "top_reasons": [f"{x.get('股票','')}｜{liquidity_penalty_reason(x)}" for x in liquidity_filtered[:10]],
+                "missing_liq_count": sum(1 for x in raw_candidates if "流動性達標" not in x),
+                "debug_rows": [
+                    {
+                        "股票": x.get("股票", x.get("_code", "")),
+                        "流動性達標": x.get("流動性達標", "<缺漏>"),
+                        "流動性結論": x.get("流動性結論", "<缺漏>"),
+                        "流動性摘要": x.get("流動性摘要", "<缺漏>"),
+                        "流動性排除原因": x.get("流動性排除原因", "<缺漏>"),
+                    }
+                    for x in raw_candidates[:20]
+                ],
+            }
+            source_candidates = liquidity_passed
 
-            engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
-            with st.expander("查看候選池引擎偵錯摘要", expanded=False):
-                em1, em2, em3, em4 = st.columns(4)
-                em1.metric("候選池總數", engine_summary.get("candidate_count", 0))
-                em2.metric("逐股快取命中", engine_summary.get("cache_hits", 0))
-                em3.metric("本輪新增成功", engine_summary.get("new_success", 0))
-                em4.metric("冷卻 / 失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
-                cooldown_rows = engine_summary.get("cooldown_rows", [])
-                failure_rows = engine_summary.get("failure_rows", [])
-                if cooldown_rows:
-                    st.caption("冷卻跳過：")
-                    st.dataframe(pd.DataFrame(cooldown_rows), use_container_width=True, hide_index=True)
-                if failure_rows:
-                    st.caption("本輪失敗：")
-                    st.dataframe(pd.DataFrame(failure_rows), use_container_width=True, hide_index=True)
+            if not source_candidates:
+                st.warning("本次候選池全部被盤前流動性門檻排除，請放寬條件或改用手動搜尋。")
+                liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
+                with st.expander("查看盤前流動性排除偵錯", expanded=True):
+                    dm1, dm2, dm3 = st.columns(3)
+                    dm1.metric("候選池分析數", liq_summary.get("raw_count", 0))
+                    dm2.metric("通過流動性門檻", liq_summary.get("passed_count", 0))
+                    dm3.metric("缺漏流動性欄位", liq_summary.get("missing_liq_count", 0))
+                    reasons = liq_summary.get("top_reasons", [])
+                    if reasons:
+                        st.caption("前幾個排除原因：")
+                        for r in reasons:
+                            st.write(f"- {r}")
+                    debug_rows = liq_summary.get("debug_rows", [])
+                    if debug_rows:
+                        st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
 
-        if auto_pick_mode == "嚴格模式":
-            candidates = []
-            for item in source_candidates:
-                if not is_intraday_long_candidate(item, strict=True):
-                    continue
-                item = item.copy()
-                item["策略模式"] = "嚴格模式"
-                item["_auto_mode_score"] = auto_pick_strict_score(item)
-                candidates.append(item)
-            candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
-        elif auto_pick_mode == "做空模式":
-            short_candidates = []
-            short_fallback = []
-            for item in source_candidates:
-                item2 = item.copy()
-                item2["策略模式"] = "做空模式"
-                item2["空方風報比"] = calc_short_rr(item2)
-                item2["_bearish_hits"] = bearish_signal_hits(item2)
-                item2["_auto_mode_score"] = auto_pick_short_score(item2)
-                item2["排名原因"] = build_short_auto_reason(item2)
-                item2["排名分組"] = "S_空方優先" if item2["_auto_mode_score"] >= 90 else "S_空方觀察"
-                short_fallback.append(item2)
-                if item2["_bearish_hits"] >= 2 or item2["_auto_mode_score"] >= 60:
-                    short_candidates.append(item2)
-            active_short_pool = short_candidates if len(short_candidates) >= max(top_n, 5) else short_fallback
-            candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
-        else:
-            candidates = []
-            for item in source_candidates:
-                if not is_intraday_long_candidate(item, strict=False):
-                    continue
-                item = item.copy()
-                item["策略模式"] = "一般模式"
-                item["_auto_mode_score"] = auto_pick_general_score(item)
-                candidates.append(item)
-            candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
+                engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
+                with st.expander("查看候選池引擎偵錯摘要", expanded=False):
+                    em1, em2, em3, em4 = st.columns(4)
+                    em1.metric("候選池總數", engine_summary.get("candidate_count", 0))
+                    em2.metric("逐股快取命中", engine_summary.get("cache_hits", 0))
+                    em3.metric("本輪新增成功", engine_summary.get("new_success", 0))
+                    em4.metric("冷卻 / 失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
+                    cooldown_rows = engine_summary.get("cooldown_rows", [])
+                    failure_rows = engine_summary.get("failure_rows", [])
+                    if cooldown_rows:
+                        st.caption("冷卻跳過：")
+                        st.dataframe(pd.DataFrame(cooldown_rows), use_container_width=True, hide_index=True)
+                    if failure_rows:
+                        st.caption("本輪失敗：")
+                        st.dataframe(pd.DataFrame(failure_rows), use_container_width=True, hide_index=True)
+                st.session_state.results_data = []
+                st.session_state.selected_code = None
+                st.session_state.analysis_mode = "auto"
 
-        st.session_state.results_data = candidates[:top_n]
-        st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
-        st.session_state.analysis_mode = "auto"
+            elif auto_pick_mode == "嚴格模式":
+                candidates = []
+                for item in source_candidates:
+                    if not is_intraday_long_candidate(item, strict=True):
+                        continue
+                    item = item.copy()
+                    item["策略模式"] = "嚴格模式"
+                    item["_auto_mode_score"] = auto_pick_strict_score(item)
+                    candidates.append(item)
+                candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
+            elif auto_pick_mode == "做空模式":
+                short_candidates = []
+                short_fallback = []
+                for item in source_candidates:
+                    item2 = item.copy()
+                    item2["策略模式"] = "做空模式"
+                    item2["空方風報比"] = calc_short_rr(item2)
+                    item2["_bearish_hits"] = bearish_signal_hits(item2)
+                    item2["_auto_mode_score"] = auto_pick_short_score(item2)
+                    item2["排名原因"] = build_short_auto_reason(item2)
+                    item2["排名分組"] = "S_空方優先" if item2["_auto_mode_score"] >= 90 else "S_空方觀察"
+                    short_fallback.append(item2)
+                    if item2["_bearish_hits"] >= 2 or item2["_auto_mode_score"] >= 60:
+                        short_candidates.append(item2)
+                active_short_pool = short_candidates if len(short_candidates) >= max(top_n, 5) else short_fallback
+                candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
+            else:
+                candidates = []
+                for item in source_candidates:
+                    if not is_intraday_long_candidate(item, strict=False):
+                        continue
+                    item = item.copy()
+                    item["策略模式"] = "一般模式"
+                    item["_auto_mode_score"] = auto_pick_general_score(item)
+                    candidates.append(item)
+                candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
+
+            if source_candidates:
+                if not candidates:
+                    st.warning(f"通過流動性門檻的 {len(source_candidates)} 檔，在「{auto_pick_mode}」篩選後無符合條件的標的，請嘗試切換模式或放寬條件。")
+                st.session_state.results_data = candidates[:top_n]
+                st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
+                st.session_state.analysis_mode = "auto"
+        except Exception as e:
+            st.error(f"自動挑股發生錯誤：{e}")
 
     results = st.session_state.results_data
     twse_meta = load_cached_official_meta() if st.session_state.results_data else {}
     twse_hit_count = sum(1 for r in (st.session_state.results_data or []) if str(dict(r).get("TWSE命中", "")) == "是")
     if not results:
-        st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
+        if st.session_state.analysis_mode == "auto":
+            liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
+            engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
+            raw_count = liq_summary.get("raw_count", 0)
+            passed_count = liq_summary.get("passed_count", 0)
+            st.warning(f"自動挑股已執行完成，但目前市場條件下無符合篩選的標的。（分析 {raw_count} 檔，通過流動性 {passed_count} 檔）")
+            st.caption("建議：嘗試切換到「做空模式」，或使用手動搜尋輸入特定股票代碼。")
+            with st.expander("查看自動挑股偵錯摘要", expanded=False):
+                dm1, dm2, dm3, dm4 = st.columns(4)
+                dm1.metric("候選池總數", engine_summary.get("candidate_count", 0))
+                dm2.metric("分析成功", engine_summary.get("new_success", 0) + engine_summary.get("cache_hits", 0))
+                dm3.metric("通過流動性", passed_count)
+                dm4.metric("冷卻/失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
+                top_reasons = liq_summary.get("top_reasons", [])
+                if top_reasons:
+                    st.caption("流動性排除原因（前幾名）：")
+                    for r in top_reasons[:5]:
+                        st.write(f"- {r}")
+        else:
+            st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
     else:
         if st.session_state.analysis_mode == "manual":
             st.caption("目前模式：手動搜尋｜單股搜尋走獨立路徑，不會重跑 250 檔候選池；若該檔已在候選池分析過，會直接重用逐股快取。")
@@ -7477,28 +7502,36 @@ if st.session_state.current_page == "分析中心":
                 if ps7.button("取消策略", use_container_width=True):
                     st.session_state.preset_strategy = "none"
 
+                _short_conclusion_opts = ["全部", "看空", "中性偏空", "中性"]
+                _short_signal_opts = ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"]
+                _short_weak_opts = ["全部", "價跌量增", "開高走低爆量", "跳空下跌", "量縮", "量比>=1"]
+                _short_rr_opts = ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"]
+                _short_hits_opts = ["全部", ">=2", ">=3"]
+
+                _pre_conclusion = "全部"; _pre_signal = "全部"; _pre_weak = "全部"
+                _pre_rr = "全部"; _pre_hits = "全部"; _pre_hide_green = False
+                if preset == "bearish":
+                    _pre_conclusion = "看空"; _pre_rr = ">=1.2"; _pre_hide_green = True
+                elif preset == "weak_price_volume":
+                    _pre_weak = "價跌量增"; _pre_rr = ">=1.0"
+                elif preset == "high_short_rr":
+                    _pre_rr = ">=1.5"; _pre_hits = ">=2"
+                elif preset == "breakdown_watch":
+                    _pre_weak = "跳空下跌"; _pre_hits = ">=2"
+                elif preset == "rebound_short":
+                    _pre_conclusion = "中性偏空"; _pre_rr = ">=1.2"
+                elif preset == "hide_green_only":
+                    _pre_hide_green = True
+
                 with st.expander("進階條件", expanded=False):
                     fl1, fl2 = st.columns(2)
-                    conclusion_filter = fl1.selectbox("空方傾向", ["全部", "看空", "中性偏空", "中性"], index=0)
-                    signal_filter = fl2.selectbox("交易訊號", ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"], index=0)
+                    conclusion_filter = fl1.selectbox("空方傾向", _short_conclusion_opts, index=_short_conclusion_opts.index(_pre_conclusion))
+                    signal_filter = fl2.selectbox("交易訊號", _short_signal_opts, index=_short_signal_opts.index(_pre_signal))
                     fl3, fl4, fl5 = st.columns(3)
-                    weak_filter = fl3.selectbox("弱勢型態", ["全部", "價跌量增", "開高走低爆量", "跳空下跌", "量縮", "量比>=1"], index=0)
-                    min_short_rr = fl4.selectbox("最低空方風報比", ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"], index=0)
-                    hits_filter = fl5.selectbox("最低弱勢訊號數", ["全部", ">=2", ">=3"], index=0)
-                    hide_green = st.checkbox("隱藏綠燈 / 偏多股", value=False)
-
-                if preset == "bearish":
-                    conclusion_filter = "看空"; min_short_rr = ">=1.2"; hide_green = True
-                elif preset == "weak_price_volume":
-                    weak_filter = "價跌量增"; min_short_rr = ">=1.0"
-                elif preset == "high_short_rr":
-                    min_short_rr = ">=1.5"; hits_filter = ">=2"
-                elif preset == "breakdown_watch":
-                    weak_filter = "跳空下跌"; hits_filter = ">=2"
-                elif preset == "rebound_short":
-                    conclusion_filter = "中性偏空"; min_short_rr = ">=1.2"
-                elif preset == "hide_green_only":
-                    hide_green = True
+                    weak_filter = fl3.selectbox("弱勢型態", _short_weak_opts, index=_short_weak_opts.index(_pre_weak))
+                    min_short_rr = fl4.selectbox("最低空方風報比", _short_rr_opts, index=_short_rr_opts.index(_pre_rr))
+                    hits_filter = fl5.selectbox("最低弱勢訊號數", _short_hits_opts, index=_short_hits_opts.index(_pre_hits))
+                    hide_green = st.checkbox("隱藏綠燈 / 偏多股", value=_pre_hide_green)
 
                 if conclusion_filter != "全部":
                     filtered_df = filtered_df[filtered_df["結論"] == conclusion_filter]
@@ -7547,27 +7580,34 @@ if st.session_state.current_page == "分析中心":
                 if ps7.button("取消策略", use_container_width=True):
                     st.session_state.preset_strategy = "none"
 
+                _long_trend_opts = ["全部", "綠燈", "黃燈", "紅燈"]
+                _long_signal_opts = ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"]
+                _long_vol_opts = ["全部", "量增", "量縮", "量比>=1"]
+                _long_rr_opts = ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"]
+
+                _pre_trend = "全部"; _pre_signal = "全部"; _pre_vol = "全部"
+                _pre_rr = "全部"; _pre_hide_red = False
+                if preset == "bullish":
+                    _pre_trend = "綠燈"; _pre_rr = ">=1.2"; _pre_hide_red = True
+                elif preset == "volume_up":
+                    _pre_vol = "量增"; _pre_rr = ">=1.0"
+                elif preset == "high_rr":
+                    _pre_rr = ">=1.5"; _pre_hide_red = True
+                elif preset == "breakout_watch":
+                    _pre_signal = "⏳等待"; _pre_rr = ">=1.0"
+                elif preset == "low_risk":
+                    _pre_trend = "綠燈"; _pre_rr = ">=1.2"; _pre_vol = "量比>=1"; _pre_hide_red = True
+                elif preset == "hide_red_only":
+                    _pre_hide_red = True
+
                 with st.expander("進階條件", expanded=False):
                     fl1, fl2 = st.columns(2)
-                    trend_filter = fl1.selectbox("趨勢燈號", ["全部", "綠燈", "黃燈", "紅燈"], index=0)
-                    signal_filter = fl2.selectbox("交易訊號", ["全部", "🔥進場", "👀觀察", "⏳等待", "❌不進"], index=0)
+                    trend_filter = fl1.selectbox("趨勢燈號", _long_trend_opts, index=_long_trend_opts.index(_pre_trend))
+                    signal_filter = fl2.selectbox("交易訊號", _long_signal_opts, index=_long_signal_opts.index(_pre_signal))
                     fl3, fl4, fl5 = st.columns(3)
-                    volume_filter = fl3.selectbox("量能條件", ["全部", "量增", "量縮", "量比>=1"], index=0)
-                    min_rr = fl4.selectbox("最低風報比", ["全部", ">=1.0", ">=1.2", ">=1.5", ">=2.0"], index=0)
-                    hide_red = fl5.checkbox("隱藏紅燈 / 不進", value=False)
-
-                if preset == "bullish":
-                    trend_filter = "綠燈"; min_rr = ">=1.2"; hide_red = True
-                elif preset == "volume_up":
-                    volume_filter = "量增"; min_rr = ">=1.0"
-                elif preset == "high_rr":
-                    min_rr = ">=1.5"; hide_red = True
-                elif preset == "breakout_watch":
-                    signal_filter = "⏳等待"; min_rr = ">=1.0"
-                elif preset == "low_risk":
-                    trend_filter = "綠燈"; min_rr = ">=1.2"; volume_filter = "量比>=1"; hide_red = True
-                elif preset == "hide_red_only":
-                    hide_red = True
+                    volume_filter = fl3.selectbox("量能條件", _long_vol_opts, index=_long_vol_opts.index(_pre_vol))
+                    min_rr = fl4.selectbox("最低風報比", _long_rr_opts, index=_long_rr_opts.index(_pre_rr))
+                    hide_red = fl5.checkbox("隱藏紅燈 / 不進", value=_pre_hide_red)
 
                 if trend_filter != "全部":
                     filtered_df = filtered_df[filtered_df["趨勢燈號"] == trend_filter]
@@ -8307,9 +8347,9 @@ if st.session_state.current_page == "快照中心":
                         "盤前收盤": pre_row.get("收盤", ""),
                         "盤後收盤": post_row.get("收盤", ""),
                         "盤前支撐": pre_row.get("支撐", ""),
-                        "盤後最低": post_row.get("收盤", ""),
+                        "盤後最低": post_row.get("支撐", ""),
                         "盤前壓力": pre_row.get("短期壓力", ""),
-                        "盤後最高": post_row.get("收盤", ""),
+                        "盤後最高": post_row.get("短期壓力", ""),
                         "盤前建議進場": pre_row.get("進場", ""),
                         "模擬進場價": pre_row.get("進場", ""),
                         "盤前停損": pre_row.get("停損", ""),
@@ -8502,7 +8542,7 @@ if st.session_state.current_page == "快照中心":
                 st.markdown(f"#### 批次摘要：{chosen_label}")
                 st.caption(f"目前鎖定批次 ID：{selected_batch_id}。這裡只放批次層資訊與最重要摘要，不直接塞全部差異與單股明細。")
                 render_info_card_grid([
-                    {"label": "批次檔數", "value": f"{chosen_group["檔數"]} 檔", "sub": "這次盤前名單的股票數量"},
+                    {"label": "批次檔數", "value": f"{chosen_group.get('檔數', 0)} 檔", "sub": "這次盤前名單的股票數量"},
                     {"label": "預覽股票數", "value": str(min(len(chosen_group.get("股票清單", [])), 8)), "sub": "摘要區只先顯示前八檔"},
                     {"label": "盤後可判定", "value": "是" if post_market_status.get("ready", False) else "否", "sub": post_market_status.get("stage", "")},
                     {"label": "已產生對照", "value": "是" if has_active_result else "否", "sub": "若切換批次需重新產生"},
