@@ -7171,31 +7171,47 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         current_index = labels.index(current_label) if current_label in labels else 0
 
         if st.session_state.mobile_mode:
-            selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile")
-            st.session_state.selected_code = option_map[selected_display]
             nav1, nav2 = st.columns(2)
+            nav_clicked = False
             if nav1.button("上一檔", use_container_width=True, key="detail_prev_mobile"):
                 move_selected(select_source, -1)
+                nav_clicked = True
             if nav2.button("下一檔", use_container_width=True, key="detail_next_mobile"):
                 move_selected(select_source, 1)
+                nav_clicked = True
+            current_label = reverse_map.get(st.session_state.selected_code, labels[0])
+            current_index = labels.index(current_label) if current_label in labels else 0
+            selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile")
+            if not nav_clicked:
+                st.session_state.selected_code = option_map[selected_display]
             code_values = list(option_map.values())
             pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
             st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
+            if nav_clicked:
+                st.rerun()
         else:
             nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
+            nav_clicked = False
             with nav1:
                 if st.button("上一檔", use_container_width=True, key="detail_prev_pc"):
                     move_selected(select_source, -1)
+                    nav_clicked = True
             with nav2:
                 if st.button("下一檔", use_container_width=True, key="detail_next_pc"):
                     move_selected(select_source, 1)
+                    nav_clicked = True
             with nav3:
+                current_label = reverse_map.get(st.session_state.selected_code, labels[0])
+                current_index = labels.index(current_label) if current_label in labels else 0
                 selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_pc")
-                st.session_state.selected_code = option_map[selected_display]
+                if not nav_clicked:
+                    st.session_state.selected_code = option_map[selected_display]
             with nav4:
                 code_values = list(option_map.values())
                 pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
                 st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
+            if nav_clicked:
+                st.rerun()
 
             st.markdown("#### 快速查看")
             quick_cols = st.columns(min(5, len(select_source)))
