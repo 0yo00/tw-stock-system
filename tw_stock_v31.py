@@ -1820,18 +1820,18 @@ def _fetch_tpex_openapi_three_insti_recent_v149(days_back: int = 14):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_institutional_bundle_all():
+    import time as _inst_time
+    _inst_deadline = _inst_time.time() + 15
     source_groups = [
         ('TWSE', [
-            ('TWSE_T86_HTML', lambda: _fetch_twse_t86_html_recent_v137(14)),
-            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(14)),
-            ('TWSE_RWD_JSON', lambda: _fetch_twse_t86_json_recent_v137(14)),
             ('TWSE_OPENAPI_TWT38U_ALL', lambda: _fetch_twse_openapi_rows_v137('fund/TWT38U_ALL')),
             ('TWSE_OPENAPI_T86', lambda: _fetch_twse_openapi_rows_v137('fund/T86')),
+            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(1)),
+            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(1)),
         ]),
         ('TPEx', [
-            ('TPEX_MAINBOARD_DAY_HTML', lambda: _fetch_tpex_mainboard_daily_html_recent_v149(14)),
-            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(14)),
-            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(14)),
+            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(1)),
+            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(1)),
         ]),
     ]
     debug_rows = []
@@ -1839,6 +1839,11 @@ def fetch_institutional_bundle_all():
     chosen_sources = {'TWSE': 'NONE', 'TPEx': 'NONE'}
     for market_name, attempts in source_groups:
         for source_name, loader in attempts:
+            if final_maps[market_name]:
+                break
+            if _inst_time.time() > _inst_deadline:
+                debug_rows.append({'市場': market_name, '來源': source_name, '狀態': '超時跳過', '原始筆數': 0, '解析命中': 0, '示例代碼': '', 'URL': '', 'HTTP': '', '預覽': '', '錯誤': '15s deadline exceeded'})
+                continue
             loader_error = ''
             fetch_attempts = []
             try:
@@ -4004,6 +4009,7 @@ def move_selected(select_source: pd.DataFrame, step: int):
         idx = 0
     new_idx = max(0, min(len(codes) - 1, idx + step))
     st.session_state.selected_code = codes[new_idx]
+    st.session_state["_nav_override"] = True
 
 
 def build_favorites_panel(favs, market_score_adj, name_map):
@@ -7170,48 +7176,53 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         current_label = reverse_map.get(st.session_state.selected_code, labels[0])
         current_index = labels.index(current_label) if current_label in labels else 0
 
+        _nav_did_override = st.session_state.pop("_nav_override", False)
+
+        def _on_select_change(key, omap):
+            val = st.session_state.get(key)
+            if val and val in omap:
+                st.session_state.selected_code = omap[val]
+
         if st.session_state.mobile_mode:
             nav1, nav2 = st.columns(2)
-            nav_clicked = False
-            if nav1.button("上一檔", use_container_width=True, key="detail_prev_mobile"):
-                move_selected(select_source, -1)
-                nav_clicked = True
-            if nav2.button("下一檔", use_container_width=True, key="detail_next_mobile"):
-                move_selected(select_source, 1)
-                nav_clicked = True
+            nav1.button("上一檔", use_container_width=True, key="detail_prev_mobile",
+                        on_click=move_selected, args=(select_source, -1))
+            nav2.button("下一檔", use_container_width=True, key="detail_next_mobile",
+                        on_click=move_selected, args=(select_source, 1))
             current_label = reverse_map.get(st.session_state.selected_code, labels[0])
             current_index = labels.index(current_label) if current_label in labels else 0
-            selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile")
-            if not nav_clicked:
-                st.session_state.selected_code = option_map[selected_display]
+            st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile",
+                         on_change=_on_select_change, args=("detail_select_mobile", option_map),
+                         disabled=_nav_did_override)
+            if not _nav_did_override:
+                sel_val = st.session_state.get("detail_select_mobile")
+                if sel_val and sel_val in option_map:
+                    st.session_state.selected_code = option_map[sel_val]
             code_values = list(option_map.values())
             pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
             st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
-            if nav_clicked:
-                st.rerun()
         else:
             nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
-            nav_clicked = False
             with nav1:
-                if st.button("上一檔", use_container_width=True, key="detail_prev_pc"):
-                    move_selected(select_source, -1)
-                    nav_clicked = True
+                st.button("上一檔", use_container_width=True, key="detail_prev_pc",
+                          on_click=move_selected, args=(select_source, -1))
             with nav2:
-                if st.button("下一檔", use_container_width=True, key="detail_next_pc"):
-                    move_selected(select_source, 1)
-                    nav_clicked = True
+                st.button("下一檔", use_container_width=True, key="detail_next_pc",
+                          on_click=move_selected, args=(select_source, 1))
             with nav3:
                 current_label = reverse_map.get(st.session_state.selected_code, labels[0])
                 current_index = labels.index(current_label) if current_label in labels else 0
-                selected_display = st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_pc")
-                if not nav_clicked:
-                    st.session_state.selected_code = option_map[selected_display]
+                st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_pc",
+                             on_change=_on_select_change, args=("detail_select_pc", option_map),
+                             disabled=_nav_did_override)
+                if not _nav_did_override:
+                    sel_val = st.session_state.get("detail_select_pc")
+                    if sel_val and sel_val in option_map:
+                        st.session_state.selected_code = option_map[sel_val]
             with nav4:
                 code_values = list(option_map.values())
                 pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
                 st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
-            if nav_clicked:
-                st.rerun()
 
             st.markdown("#### 快速查看")
             quick_cols = st.columns(min(5, len(select_source)))
