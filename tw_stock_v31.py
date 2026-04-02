@@ -848,10 +848,12 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
     low_col = df["Low"]
 
     df["ma5"] = close_col.rolling(5).mean()
+    df["ma10"] = close_col.rolling(10).mean()
     df["ma20"] = close_col.rolling(20).mean()
     df["ma60"] = close_col.rolling(60).mean()
     df["ma120"] = close_col.rolling(120).mean()
     df["vol5"] = volume_col.rolling(5).mean()
+    df["vol20"] = volume_col.rolling(20).mean()
     df["atr"] = (high_col - low_col).rolling(14).mean()
     df["rsi"] = calc_rsi(close_col, 14)
     df["bias5"] = ((close_col - df["ma5"]) / df["ma5"] * 100).fillna(0)
@@ -5134,6 +5136,221 @@ def is_intraday_long_candidate(item: dict, strict: bool = False) -> bool:
     return True
 
 
+def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
+    if df is None or df.empty or len(df) < 20:
+        return None
+    close_s = pd.to_numeric(df["Close"], errors="coerce")
+    high_s = pd.to_numeric(df["High"], errors="coerce")
+    low_s = pd.to_numeric(df["Low"], errors="coerce")
+    open_s = pd.to_numeric(df["Open"], errors="coerce")
+    vol_s = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+
+    close = float(close_s.iloc[-1])
+    high = float(high_s.iloc[-1])
+    low = float(low_s.iloc[-1])
+    open_ = float(open_s.iloc[-1])
+    vol = float(vol_s.iloc[-1])
+
+    ma5 = float(df["ma5"].iloc[-1]) if "ma5" in df.columns and pd.notna(df["ma5"].iloc[-1]) else None
+    ma10 = float(df["ma10"].iloc[-1]) if "ma10" in df.columns and pd.notna(df["ma10"].iloc[-1]) else None
+    ma20 = float(df["ma20"].iloc[-1]) if "ma20" in df.columns and pd.notna(df["ma20"].iloc[-1]) else None
+    vol20 = float(df["vol20"].iloc[-1]) if "vol20" in df.columns and pd.notna(df["vol20"].iloc[-1]) else float(vol_s.tail(20).mean())
+    vol5 = float(df["vol5"].iloc[-1]) if "vol5" in df.columns and pd.notna(df["vol5"].iloc[-1]) else vol
+
+    if ma5 is None or ma10 is None or close <= 0:
+        return None
+
+    vol_lots_20 = vol_s.tail(20) / 1000.0
+    avg_value_20 = float((close_s.tail(20) * vol_s.tail(20)).mean()) / 1e8
+    avg_vol_lots_20 = float(vol_lots_20.mean())
+
+    # ---- 1. 硬性過濾 ----
+    if close > 1000:
+        return None
+    has_value = avg_value_20 >= 3.0
+    has_vol = avg_vol_lots_20 >= 5000
+    if not has_value and not has_vol:
+        return None
+    min_vol_5d = float(vol_s.tail(5).min()) / 1000.0
+    if min_vol_5d <= 1000:
+        return None
+
+    # ---- 2. 做多必要條件 ----
+    if close <= ma5 or close <= ma10:
+        return None
+    if ma5 < ma10:
+        return None
+    low20 = float(low_s.tail(20).min())
+    if low20 > 0 and close < low20 * 1.08:
+        return None
+    if vol20 > 0 and vol < vol20 * 0.8:
+        return None
+
+    tail3 = df.tail(3)
+    t3_close = pd.to_numeric(tail3["Close"], errors="coerce")
+    t3_open = pd.to_numeric(tail3["Open"], errors="coerce")
+    t3_vol = pd.to_numeric(tail3["Volume"], errors="coerce").fillna(0)
+    black_count = 0
+    for i in range(len(tail3)):
+        c_i, o_i = float(t3_close.iloc[i]), float(t3_open.iloc[i])
+        v_i = float(t3_vol.iloc[i])
+        v_prev = float(t3_vol.iloc[i - 1]) if i > 0 else v_i
+        is_black = c_i < o_i
+        is_vol_up = v_i > v_prev * 1.05
+        if is_black and is_vol_up:
+            black_count += 1
+        body = abs(c_i - o_i)
+        bar_range = float(high_s.iloc[-(3 - i)]) - float(low_s.iloc[-(3 - i)])
+        if is_black and is_vol_up and bar_range > 0 and body / bar_range > 0.6 and v_i > vol20 * 1.5:
+            return None
+        if i > 0:
+            prev_ma5 = df["ma5"].iloc[-(3 - i + 1)] if "ma5" in df.columns else None
+            if prev_ma5 is not None and pd.notna(prev_ma5) and c_i < float(prev_ma5) * 0.97:
+                return None
+    if black_count >= 2:
+        return None
+
+    # ---- 5. 強制排除 ----
+    close_5ago = float(close_s.iloc[-6]) if len(df) >= 6 else close
+    chg_5d_pct = (close - close_5ago) / close_5ago * 100 if close_5ago > 0 else 0
+    if close < ma10 and ma5 < ma10:
+        return None
+    if chg_5d_pct < -5:
+        return None
+    upper_shadow = high - max(close, open_)
+    bar_range = high - low
+    if bar_range > 0 and upper_shadow / bar_range > 0.45 and vol > vol20 * 1.8:
+        return None
+    if close > 1000:
+        return None
+
+    # ---- 3. 評分 ----
+    score_trend = 0
+    if close > ma5:
+        score_trend += 8
+    if close > ma10:
+        score_trend += 8
+    if ma5 > ma10:
+        score_trend += 6
+    if len(df) >= 3 and "ma10" in df.columns:
+        ma10_prev = df["ma10"].iloc[-3]
+        if pd.notna(ma10_prev) and ma10 >= float(ma10_prev):
+            score_trend += 8
+
+    score_momentum = 0
+    if 3 <= chg_5d_pct <= 15:
+        score_momentum += 15
+    elif 0 <= chg_5d_pct < 3:
+        score_momentum += 8
+    elif chg_5d_pct > 15:
+        score_momentum += 4
+    close_pos = (close - low) / (high - low) if high > low else 0.5
+    if close_pos >= 0.7:
+        score_momentum += 10
+
+    score_volume = 0
+    vol_ratio_20 = vol / vol20 if vol20 > 0 else 1.0
+    if 1.2 <= vol_ratio_20 <= 2.5:
+        score_volume += 12
+    elif 0.9 <= vol_ratio_20 < 1.2:
+        score_volume += 6
+    if len(tail3) >= 3:
+        up_vols, dn_vols = [], []
+        for i in range(len(tail3)):
+            c_i = float(t3_close.iloc[i])
+            o_i = float(t3_open.iloc[i])
+            v_i = float(t3_vol.iloc[i])
+            if c_i >= o_i:
+                up_vols.append(v_i)
+            else:
+                dn_vols.append(v_i)
+        avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
+        avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
+        if avg_up > avg_dn and up_vols:
+            score_volume += 8
+
+    score_chip = 0
+    has_inst = False
+    foreign_val = float(item.get("外資買賣超", 0) or 0)
+    trust_val = float(item.get("投信買賣超", 0) or 0)
+    if foreign_val != 0 or trust_val != 0:
+        has_inst = True
+        if foreign_val > 0:
+            score_chip += 6
+        if trust_val > 0:
+            score_chip += 6
+        if foreign_val > 0 and trust_val > 0:
+            score_chip += 3
+    if not has_inst:
+        avg_val_3 = float((close_s.tail(3) * vol_s.tail(3)).mean()) / 1e8
+        avg_val_20 = avg_value_20
+        if avg_val_3 > avg_val_20:
+            score_chip += 15
+
+    score_risk = 0
+    if bar_range > 0 and upper_shadow / bar_range > 0.45:
+        score_risk -= 8
+    is_black_today = close < open_
+    if is_black_today and vol > vol20 * 1.5:
+        score_risk -= 10
+    if ma5 > 0 and (close - ma5) / ma5 > 0.08:
+        score_risk -= 6
+
+    total = score_trend + score_momentum + score_volume + score_chip + score_risk
+    total = max(0, min(100, total))
+
+    reasons = []
+    if score_trend >= 22:
+        reasons.append("趨勢強")
+    if chg_5d_pct >= 3:
+        reasons.append(f"5日漲{chg_5d_pct:.1f}%")
+    if vol_ratio_20 >= 1.2:
+        reasons.append(f"量比{vol_ratio_20:.1f}倍")
+    if foreign_val > 0:
+        reasons.append("外資買")
+    if trust_val > 0:
+        reasons.append("投信買")
+    if not reasons:
+        reasons.append("綜合評分")
+
+    warnings = []
+    if score_risk < 0:
+        if bar_range > 0 and upper_shadow / bar_range > 0.45:
+            warnings.append("長上影")
+        if is_black_today and vol > vol20 * 1.5:
+            warnings.append("爆量黑K")
+        if ma5 > 0 and (close - ma5) / ma5 > 0.08:
+            warnings.append("離MA5過遠")
+
+    return {
+        "long_total": total,
+        "long_trend": score_trend,
+        "long_momentum": score_momentum,
+        "long_volume": score_volume,
+        "long_chip": score_chip,
+        "long_risk": score_risk,
+        "long_reason": "、".join(reasons[:4]),
+        "long_warning": "、".join(warnings) if warnings else "",
+        "long_chg5d": round(chg_5d_pct, 2),
+        "long_vol_ratio": round(vol_ratio_20, 2),
+        "long_close_pos": round(close_pos, 2),
+    }
+
+
+def long_pick_strict_ok(metrics: dict) -> bool:
+    if metrics is None:
+        return False
+    if metrics["long_total"] < 75:
+        return False
+    if metrics.get("long_chg5d", 0) <= 0:
+        return False
+    if metrics.get("long_vol_ratio", 0) < 1.0:
+        return False
+    if "爆量黑K" in metrics.get("long_warning", ""):
+        return False
+    return True
+
+
 def auto_pick_general_score(item: dict) -> float:
     score = 0.0
     inst_score = float(item.get("法人分數", 0) or 0)
@@ -7288,10 +7505,10 @@ if st.session_state.current_page == "分析中心":
 
         opm1, opm2 = st.columns(2)
         with opm1:
-            auto_pick_mode = st.selectbox("自動挑股模式", ["做多模式", "做空模式"], index=0)
+            auto_pick_mode = st.selectbox("自動挑股模式", ["做多（一般）", "做多（嚴格）", "做空模式"], index=0)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
-        st.caption("做多模式：依綜合分數排序，優先顯示偏多、量價同步、風報比佳的標的；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("做多（一般）：總分≥65，趨勢+動能+量價+籌碼綜合評分；做多（嚴格）：總分≥75，需同時滿足所有條件；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
         st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
@@ -7412,13 +7629,38 @@ if st.session_state.current_page == "分析中心":
                 active_short_pool = short_candidates if len(short_candidates) >= max(top_n, 5) else short_fallback
                 candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
             else:
+                is_strict = auto_pick_mode == "做多（嚴格）"
+                threshold = 75 if is_strict else 65
+                mode_label_str = "做多（嚴格）" if is_strict else "做多（一般）"
                 candidates = []
                 for item in source_candidates:
+                    code = item.get("_code", item.get("股票代碼", ""))
+                    try:
+                        df_chart = get_symbol_indicator_chart(code)
+                    except Exception:
+                        df_chart = None
+                    metrics = long_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
+                    if metrics is None:
+                        continue
+                    if is_strict and not long_pick_strict_ok(metrics):
+                        continue
+                    if metrics["long_total"] < threshold:
+                        continue
                     item = item.copy()
-                    item["策略模式"] = "做多模式"
-                    item["_auto_mode_score"] = auto_pick_general_score(item)
+                    item["策略模式"] = mode_label_str
+                    item["_auto_mode_score"] = metrics["long_total"]
+                    item["做多總分"] = metrics["long_total"]
+                    item["趨勢分"] = metrics["long_trend"]
+                    item["動能分"] = metrics["long_momentum"]
+                    item["量價分"] = metrics["long_volume"]
+                    item["籌碼分"] = metrics["long_chip"]
+                    item["風險扣分"] = metrics["long_risk"]
+                    item["入選原因"] = metrics["long_reason"]
+                    item["風險警示"] = metrics["long_warning"]
+                    item["5日漲幅%"] = metrics["long_chg5d"]
+                    item["量比20日"] = metrics["long_vol_ratio"]
                     candidates.append(item)
-                candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
+                candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
 
             if source_candidates:
                 st.session_state.results_data = candidates[:top_n]
