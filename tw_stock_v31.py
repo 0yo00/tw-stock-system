@@ -938,7 +938,7 @@ def _apply_official_latest_bar(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
 
     if target_idx > last_idx:
         df.loc[target_idx] = new_row
-    else:
+    elif target_idx == last_idx:
         df.loc[df.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
             new_row["Open"], new_row["High"], new_row["Low"], new_row["Close"], new_row["Volume"]
         ]
