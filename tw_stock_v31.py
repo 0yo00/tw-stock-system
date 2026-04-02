@@ -3452,7 +3452,7 @@ def liquidity_auto_bonus(item: dict, mode: str = "general") -> float:
         score -= 8.0
     return round(score, 2)
 
-CANDIDATE_FAIL_COOLDOWN_MINUTES = 20
+CANDIDATE_FAIL_COOLDOWN_MINUTES = 5
 
 
 def _analysis_refresh_tag() -> str:
@@ -3613,28 +3613,34 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
         pending_codes.append(code_u)
 
     if pending_codes:
-        max_workers = min(10, max(4, len(pending_codes) // 24 + 2))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(analyze_one, code, market_adj, name_map): code for code in pending_codes}
-            for fut in as_completed(futures):
-                code_u = futures[fut]
-                try:
-                    item = fut.result()
-                except Exception as e:
-                    reason = f"{type(e).__name__}: {e}"
-                    _candidate_register_failure(code_u, reason)
-                    debug["new_failures"] += 1
-                    debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
-                    continue
-                if item is None:
-                    reason = "無有效日線或資料天數不足"
-                    _candidate_register_failure(code_u, reason)
-                    debug["new_failures"] += 1
-                    debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
-                    continue
-                _candidate_stock_cache_set(code_u, market_adj, item)
-                results.append(item)
-                debug["new_success"] += 1
+        import time as _time_mod
+        batch_size = 20
+        max_workers = 4
+        for batch_start in range(0, len(pending_codes), batch_size):
+            batch = pending_codes[batch_start:batch_start + batch_size]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(analyze_one, code, market_adj, name_map): code for code in batch}
+                for fut in as_completed(futures):
+                    code_u = futures[fut]
+                    try:
+                        item = fut.result()
+                    except Exception as e:
+                        reason = f"{type(e).__name__}: {e}"
+                        _candidate_register_failure(code_u, reason)
+                        debug["new_failures"] += 1
+                        debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        continue
+                    if item is None:
+                        reason = "無有效日線或資料天數不足"
+                        _candidate_register_failure(code_u, reason)
+                        debug["new_failures"] += 1
+                        debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        continue
+                    _candidate_stock_cache_set(code_u, market_adj, item)
+                    results.append(item)
+                    debug["new_success"] += 1
+            if batch_start + batch_size < len(pending_codes):
+                _time_mod.sleep(0.5)
 
     debug["result_count"] = len(results)
     return results, debug
@@ -7505,10 +7511,10 @@ if st.session_state.current_page == "分析中心":
 
         opm1, opm2 = st.columns(2)
         with opm1:
-            auto_pick_mode = st.selectbox("自動挑股模式", ["做多（一般）", "做多（嚴格）", "做空模式"], index=0)
+            auto_pick_mode = st.selectbox("自動挑股模式", ["做多模式", "做空模式"], index=0)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
-        st.caption("做多（一般）：總分≥65，趨勢+動能+量價+籌碼綜合評分；做多（嚴格）：總分≥75，需同時滿足所有條件；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分，篩選實戰可操作標的；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
         st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
@@ -7629,9 +7635,6 @@ if st.session_state.current_page == "分析中心":
                 active_short_pool = short_candidates if len(short_candidates) >= max(top_n, 5) else short_fallback
                 candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
             else:
-                is_strict = auto_pick_mode == "做多（嚴格）"
-                threshold = 75 if is_strict else 65
-                mode_label_str = "做多（嚴格）" if is_strict else "做多（一般）"
                 candidates = []
                 for item in source_candidates:
                     code = item.get("_code", item.get("股票代碼", ""))
@@ -7642,12 +7645,10 @@ if st.session_state.current_page == "分析中心":
                     metrics = long_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
                     if metrics is None:
                         continue
-                    if is_strict and not long_pick_strict_ok(metrics):
-                        continue
-                    if metrics["long_total"] < threshold:
+                    if metrics["long_total"] < 60:
                         continue
                     item = item.copy()
-                    item["策略模式"] = mode_label_str
+                    item["策略模式"] = "做多模式"
                     item["_auto_mode_score"] = metrics["long_total"]
                     item["做多總分"] = metrics["long_total"]
                     item["趨勢分"] = metrics["long_trend"]
