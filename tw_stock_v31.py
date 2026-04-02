@@ -31,7 +31,7 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 APP_VERSION = "V178"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "空方總表當沖化修正版：空方建議進場／停損／短期壓力／中繼目標全面限制在次日可交易邊界內；一般模式與嚴格模式也收斂成多方當沖優先。"
+APP_VERSION_NOTE = "自動挑股改為做多/做空雙模式，修正收盤價抓取問題。"
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
@@ -944,9 +944,49 @@ def _apply_official_latest_bar(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
     return normalize_df(df)
 
 
+def _patch_today_nan_row(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    last_close = df["Close"].iloc[-1] if "Close" in df.columns else None
+    try:
+        if last_close is not None and pd.notna(last_close):
+            return df
+    except Exception:
+        return df
+    try:
+        ticker = yf.Ticker(symbol.strip())
+        fi = ticker.fast_info
+        price = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
+        prev = getattr(fi, "previous_close", None) or getattr(fi, "previousClose", None)
+        if price is None or not isinstance(price, (int, float)) or price <= 0:
+            return df
+        intra = ticker.history(period="1d", interval="1m")
+        if intra is not None and not intra.empty:
+            today_open = float(intra["Open"].iloc[0])
+            today_high = float(intra["High"].max())
+            today_low = float(intra["Low"].min())
+            today_close = float(intra["Close"].iloc[-1])
+            today_vol = int(intra["Volume"].sum())
+        else:
+            today_open = price
+            today_high = price
+            today_low = price
+            today_close = price
+            today_vol = 0
+        df.loc[df.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+            today_open, today_high, today_low, today_close, today_vol
+        ]
+    except Exception:
+        pass
+    return df
+
 @st.cache_data(ttl=600, show_spinner=False)
 def download_symbol(symbol: str) -> pd.DataFrame:
     df = yf.download(symbol.strip(), period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    if df is not None and not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df = _patch_today_nan_row(symbol, df)
     df = normalize_df(df)
     return _apply_official_latest_bar(symbol, df)
 
@@ -7248,10 +7288,10 @@ if st.session_state.current_page == "分析中心":
 
         opm1, opm2 = st.columns(2)
         with opm1:
-            auto_pick_mode = st.selectbox("自動挑股模式", ["一般模式", "嚴格模式", "做空模式"], index=0)
+            auto_pick_mode = st.selectbox("自動挑股模式", ["做多模式", "做空模式"], index=0)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
-        st.caption("一般模式：多方當沖優先，偏活躍/量價同步/可執行停損；嚴格模式：多方當沖且風報比較乾淨；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("做多模式：依綜合分數排序，優先顯示偏多、量價同步、風報比佳的標的；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
         st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
@@ -7355,16 +7395,6 @@ if st.session_state.current_page == "分析中心":
                 st.session_state.selected_code = None
                 st.session_state.analysis_mode = "auto"
 
-            elif auto_pick_mode == "嚴格模式":
-                candidates = []
-                for item in source_candidates:
-                    if not is_intraday_long_candidate(item, strict=True):
-                        continue
-                    item = item.copy()
-                    item["策略模式"] = "嚴格模式"
-                    item["_auto_mode_score"] = auto_pick_strict_score(item)
-                    candidates.append(item)
-                candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
             elif auto_pick_mode == "做空模式":
                 short_candidates = []
                 short_fallback = []
@@ -7384,17 +7414,13 @@ if st.session_state.current_page == "分析中心":
             else:
                 candidates = []
                 for item in source_candidates:
-                    if not is_intraday_long_candidate(item, strict=False):
-                        continue
                     item = item.copy()
-                    item["策略模式"] = "一般模式"
+                    item["策略模式"] = "做多模式"
                     item["_auto_mode_score"] = auto_pick_general_score(item)
                     candidates.append(item)
                 candidates = sorted(candidates, key=lambda x: (x.get("_auto_mode_score", 0), x.get("_rank", 0)), reverse=True)
 
             if source_candidates:
-                if not candidates:
-                    st.warning(f"通過流動性門檻的 {len(source_candidates)} 檔，在「{auto_pick_mode}」篩選後無符合條件的標的，請嘗試切換模式或放寬條件。")
                 st.session_state.results_data = candidates[:top_n]
                 st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
                 st.session_state.analysis_mode = "auto"
@@ -7405,26 +7431,7 @@ if st.session_state.current_page == "分析中心":
     twse_meta = load_cached_official_meta() if st.session_state.results_data else {}
     twse_hit_count = sum(1 for r in (st.session_state.results_data or []) if str(dict(r).get("TWSE命中", "")) == "是")
     if not results:
-        if st.session_state.analysis_mode == "auto":
-            liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
-            engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
-            raw_count = liq_summary.get("raw_count", 0)
-            passed_count = liq_summary.get("passed_count", 0)
-            st.warning(f"自動挑股已執行完成，但目前市場條件下無符合篩選的標的。（分析 {raw_count} 檔，通過流動性 {passed_count} 檔）")
-            st.caption("建議：嘗試切換到「做空模式」，或使用手動搜尋輸入特定股票代碼。")
-            with st.expander("查看自動挑股偵錯摘要", expanded=False):
-                dm1, dm2, dm3, dm4 = st.columns(4)
-                dm1.metric("候選池總數", engine_summary.get("candidate_count", 0))
-                dm2.metric("分析成功", engine_summary.get("new_success", 0) + engine_summary.get("cache_hits", 0))
-                dm3.metric("通過流動性", passed_count)
-                dm4.metric("冷卻/失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
-                top_reasons = liq_summary.get("top_reasons", [])
-                if top_reasons:
-                    st.caption("流動性排除原因（前幾名）：")
-                    for r in top_reasons[:5]:
-                        st.write(f"- {r}")
-        else:
-            st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
+        st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
     else:
         if st.session_state.analysis_mode == "manual":
             st.caption("目前模式：手動搜尋｜單股搜尋走獨立路徑，不會重跑 250 檔候選池；若該檔已在候選池分析過，會直接重用逐股快取。")
@@ -7432,8 +7439,6 @@ if st.session_state.current_page == "分析中心":
             layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
             source_text = layer_meta.get("mode_label", "未記錄")
             st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池來源：{source_text}")
-            if auto_pick_mode == "嚴格模式" and len(results) < top_n:
-                st.info(f"嚴格模式本次僅通過 {len(results)} 檔，未補滿 {top_n} 檔；系統不會自動用較鬆條件補齊，以避免混入品質較弱標的。")
         elif st.session_state.analysis_mode == "favorites":
             st.caption("目前模式：最愛分析")
 
