@@ -4002,6 +4002,7 @@ def move_selected(select_source: pd.DataFrame, step: int):
     if select_source.empty:
         return
     codes = select_source["_code"].tolist()
+    names = select_source["股票"].tolist()
     ensure_selected_code(select_source)
     try:
         idx = codes.index(st.session_state.selected_code)
@@ -4009,7 +4010,10 @@ def move_selected(select_source: pd.DataFrame, step: int):
         idx = 0
     new_idx = max(0, min(len(codes) - 1, idx + step))
     st.session_state.selected_code = codes[new_idx]
-    st.session_state["_nav_override"] = True
+    if new_idx < len(names):
+        for k in ["detail_select_mobile", "detail_select_pc"]:
+            if k in st.session_state:
+                st.session_state[k] = names[new_idx]
 
 
 def build_favorites_panel(favs, market_score_adj, name_map):
@@ -7176,12 +7180,10 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         current_label = reverse_map.get(st.session_state.selected_code, labels[0])
         current_index = labels.index(current_label) if current_label in labels else 0
 
-        _nav_did_override = st.session_state.pop("_nav_override", False)
-
-        def _on_select_change(key, omap):
-            val = st.session_state.get(key)
-            if val and val in omap:
-                st.session_state.selected_code = omap[val]
+        _sel_key = "detail_select_mobile" if st.session_state.mobile_mode else "detail_select_pc"
+        current_label = reverse_map.get(st.session_state.selected_code, labels[0])
+        if _sel_key not in st.session_state or st.session_state[_sel_key] not in labels:
+            st.session_state[_sel_key] = current_label
 
         if st.session_state.mobile_mode:
             nav1, nav2 = st.columns(2)
@@ -7189,15 +7191,10 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                         on_click=move_selected, args=(select_source, -1))
             nav2.button("下一檔", use_container_width=True, key="detail_next_mobile",
                         on_click=move_selected, args=(select_source, 1))
-            current_label = reverse_map.get(st.session_state.selected_code, labels[0])
-            current_index = labels.index(current_label) if current_label in labels else 0
-            st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_mobile",
-                         on_change=_on_select_change, args=("detail_select_mobile", option_map),
-                         disabled=_nav_did_override)
-            if not _nav_did_override:
-                sel_val = st.session_state.get("detail_select_mobile")
-                if sel_val and sel_val in option_map:
-                    st.session_state.selected_code = option_map[sel_val]
+            st.selectbox("選擇查看單股", labels, key="detail_select_mobile")
+            sel_val = st.session_state.get("detail_select_mobile")
+            if sel_val and sel_val in option_map:
+                st.session_state.selected_code = option_map[sel_val]
             code_values = list(option_map.values())
             pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
             st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
@@ -7210,15 +7207,10 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 st.button("下一檔", use_container_width=True, key="detail_next_pc",
                           on_click=move_selected, args=(select_source, 1))
             with nav3:
-                current_label = reverse_map.get(st.session_state.selected_code, labels[0])
-                current_index = labels.index(current_label) if current_label in labels else 0
-                st.selectbox("選擇查看單股", labels, index=current_index, key="detail_select_pc",
-                             on_change=_on_select_change, args=("detail_select_pc", option_map),
-                             disabled=_nav_did_override)
-                if not _nav_did_override:
-                    sel_val = st.session_state.get("detail_select_pc")
-                    if sel_val and sel_val in option_map:
-                        st.session_state.selected_code = option_map[sel_val]
+                st.selectbox("選擇查看單股", labels, key="detail_select_pc")
+                sel_val = st.session_state.get("detail_select_pc")
+                if sel_val and sel_val in option_map:
+                    st.session_state.selected_code = option_map[sel_val]
             with nav4:
                 code_values = list(option_map.values())
                 pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
