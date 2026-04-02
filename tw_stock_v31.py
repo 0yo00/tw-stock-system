@@ -5180,7 +5180,7 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     avg_value_20 = float((close_s.tail(20) * vol_s.tail(20)).mean()) / 1e8
     avg_vol_lots_20 = float(vol_lots_20.mean())
 
-    # ---- 1. 硬性過濾 ----
+    # ---- 1. 硬性過濾（只排除根本不能交易的）----
     if close > 1000:
         return None
     has_value = avg_value_20 >= 3.0
@@ -5191,56 +5191,20 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     if min_vol_5d <= 1000:
         return None
 
-    # ---- 2. 做多必要條件 ----
-    if close <= ma5 or close <= ma10:
-        return None
-    if ma5 < ma10:
-        return None
-    low20 = float(low_s.tail(20).min())
-    if low20 > 0 and close < low20 * 1.08:
-        return None
-    if vol20 > 0 and vol < vol20 * 0.8:
-        return None
-
-    tail3 = df.tail(3)
-    t3_close = pd.to_numeric(tail3["Close"], errors="coerce")
-    t3_open = pd.to_numeric(tail3["Open"], errors="coerce")
-    t3_vol = pd.to_numeric(tail3["Volume"], errors="coerce").fillna(0)
-    black_count = 0
-    for i in range(len(tail3)):
-        c_i, o_i = float(t3_close.iloc[i]), float(t3_open.iloc[i])
-        v_i = float(t3_vol.iloc[i])
-        v_prev = float(t3_vol.iloc[i - 1]) if i > 0 else v_i
-        is_black = c_i < o_i
-        is_vol_up = v_i > v_prev * 1.05
-        if is_black and is_vol_up:
-            black_count += 1
-        body = abs(c_i - o_i)
-        bar_range = float(high_s.iloc[-(3 - i)]) - float(low_s.iloc[-(3 - i)])
-        if is_black and is_vol_up and bar_range > 0 and body / bar_range > 0.6 and v_i > vol20 * 1.5:
-            return None
-        if i > 0:
-            prev_ma5 = df["ma5"].iloc[-(3 - i + 1)] if "ma5" in df.columns else None
-            if prev_ma5 is not None and pd.notna(prev_ma5) and c_i < float(prev_ma5) * 0.97:
-                return None
-    if black_count >= 2:
-        return None
-
-    # ---- 5. 強制排除 ----
     close_5ago = float(close_s.iloc[-6]) if len(df) >= 6 else close
     chg_5d_pct = (close - close_5ago) / close_5ago * 100 if close_5ago > 0 else 0
-    if close < ma10 and ma5 < ma10:
-        return None
-    if chg_5d_pct < -5:
-        return None
+    low20 = float(low_s.tail(20).min())
     upper_shadow = high - max(close, open_)
     bar_range = high - low
-    if bar_range > 0 and upper_shadow / bar_range > 0.45 and vol > vol20 * 1.8:
-        return None
-    if close > 1000:
+    vol_ratio_20 = vol / vol20 if vol20 > 0 else 1.0
+    close_pos = (close - low) / bar_range if bar_range > 0 else 0.5
+
+    # 強制排除：完全的空方結構 + 大跌
+    if close < ma10 and ma5 < ma10 and chg_5d_pct < -5:
         return None
 
-    # ---- 3. 評分 ----
+    # ---- 2. 評分（不再用必要條件擋，全靠分數篩）----
+    # (1) 趨勢分 30
     score_trend = 0
     if close > ma5:
         score_trend += 8
@@ -5253,6 +5217,7 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         if pd.notna(ma10_prev) and ma10 >= float(ma10_prev):
             score_trend += 8
 
+    # (2) 動能分 25
     score_momentum = 0
     if 3 <= chg_5d_pct <= 15:
         score_momentum += 15
@@ -5260,31 +5225,32 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         score_momentum += 8
     elif chg_5d_pct > 15:
         score_momentum += 4
-    close_pos = (close - low) / (high - low) if high > low else 0.5
     if close_pos >= 0.7:
         score_momentum += 10
 
+    # (3) 量價分 20
     score_volume = 0
-    vol_ratio_20 = vol / vol20 if vol20 > 0 else 1.0
     if 1.2 <= vol_ratio_20 <= 2.5:
         score_volume += 12
     elif 0.9 <= vol_ratio_20 < 1.2:
         score_volume += 6
-    if len(tail3) >= 3:
-        up_vols, dn_vols = [], []
-        for i in range(len(tail3)):
-            c_i = float(t3_close.iloc[i])
-            o_i = float(t3_open.iloc[i])
-            v_i = float(t3_vol.iloc[i])
-            if c_i >= o_i:
-                up_vols.append(v_i)
-            else:
-                dn_vols.append(v_i)
-        avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
-        avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
-        if avg_up > avg_dn and up_vols:
-            score_volume += 8
+    tail3 = df.tail(3)
+    t3_close = pd.to_numeric(tail3["Close"], errors="coerce")
+    t3_open = pd.to_numeric(tail3["Open"], errors="coerce")
+    t3_vol = pd.to_numeric(tail3["Volume"], errors="coerce").fillna(0)
+    up_vols, dn_vols = [], []
+    for i in range(len(tail3)):
+        c_i, o_i, v_i = float(t3_close.iloc[i]), float(t3_open.iloc[i]), float(t3_vol.iloc[i])
+        if c_i >= o_i:
+            up_vols.append(v_i)
+        else:
+            dn_vols.append(v_i)
+    avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
+    avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
+    if avg_up > avg_dn and up_vols:
+        score_volume += 8
 
+    # (4) 籌碼分 15
     score_chip = 0
     has_inst = False
     foreign_val = float(item.get("外資買賣超", 0) or 0)
@@ -5299,10 +5265,10 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
             score_chip += 3
     if not has_inst:
         avg_val_3 = float((close_s.tail(3) * vol_s.tail(3)).mean()) / 1e8
-        avg_val_20 = avg_value_20
-        if avg_val_3 > avg_val_20:
+        if avg_val_3 > avg_value_20:
             score_chip += 15
 
+    # (5) 風險扣分 -20
     score_risk = 0
     if bar_range > 0 and upper_shadow / bar_range > 0.45:
         score_risk -= 8
@@ -5311,6 +5277,10 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         score_risk -= 10
     if ma5 > 0 and (close - ma5) / ma5 > 0.08:
         score_risk -= 6
+    if close <= ma5 and close <= ma10:
+        score_risk -= 6
+    if chg_5d_pct < -3:
+        score_risk -= 4
 
     total = score_trend + score_momentum + score_volume + score_chip + score_risk
     total = max(0, min(100, total))
