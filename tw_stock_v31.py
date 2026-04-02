@@ -5367,6 +5367,181 @@ def long_pick_strict_ok(metrics: dict) -> bool:
     return True
 
 
+def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
+    if df is None or df.empty or len(df) < 20:
+        return None
+    close_s = pd.to_numeric(df["Close"], errors="coerce")
+    high_s = pd.to_numeric(df["High"], errors="coerce")
+    low_s = pd.to_numeric(df["Low"], errors="coerce")
+    open_s = pd.to_numeric(df["Open"], errors="coerce")
+    vol_s = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+
+    close = float(close_s.iloc[-1])
+    high = float(high_s.iloc[-1])
+    low = float(low_s.iloc[-1])
+    open_ = float(open_s.iloc[-1])
+    vol = float(vol_s.iloc[-1])
+
+    ma5 = float(df["ma5"].iloc[-1]) if "ma5" in df.columns and pd.notna(df["ma5"].iloc[-1]) else None
+    ma10 = float(df["ma10"].iloc[-1]) if "ma10" in df.columns and pd.notna(df["ma10"].iloc[-1]) else None
+    ma20 = float(df["ma20"].iloc[-1]) if "ma20" in df.columns and pd.notna(df["ma20"].iloc[-1]) else None
+    vol20 = float(df["vol20"].iloc[-1]) if "vol20" in df.columns and pd.notna(df["vol20"].iloc[-1]) else float(vol_s.tail(20).mean())
+
+    if ma5 is None or ma10 is None or close <= 0:
+        return None
+
+    vol_lots_20 = vol_s.tail(20) / 1000.0
+    avg_value_20 = float((close_s.tail(20) * vol_s.tail(20)).mean()) / 1e8
+    avg_vol_lots_20 = float(vol_lots_20.mean())
+
+    # ---- 硬性過濾（同做多）----
+    if close > 1000:
+        return None
+    has_value = avg_value_20 >= 3.0
+    has_vol = avg_vol_lots_20 >= 5000
+    if not has_value and not has_vol:
+        return None
+    min_vol_5d = float(vol_s.tail(5).min()) / 1000.0
+    if min_vol_5d <= 1000:
+        return None
+
+    # ---- 做空必要條件 ----
+    if close >= ma5 and close >= ma10 and ma5 >= ma10:
+        return None
+    high20 = float(high_s.tail(20).max())
+    if high20 > 0 and close > high20 * 0.97:
+        return None
+
+    close_5ago = float(close_s.iloc[-6]) if len(df) >= 6 else close
+    chg_5d_pct = (close - close_5ago) / close_5ago * 100 if close_5ago > 0 else 0
+
+    # ---- 強制排除 ----
+    if close > ma10 and ma5 > ma10:
+        return None
+    if chg_5d_pct > 5:
+        return None
+
+    # ---- 評分（總分 100）----
+    # (1) 趨勢分 30：空方趨勢
+    score_trend = 0
+    if close < ma5:
+        score_trend += 8
+    if close < ma10:
+        score_trend += 8
+    if ma5 < ma10:
+        score_trend += 6
+    if len(df) >= 3 and "ma10" in df.columns:
+        ma10_prev = df["ma10"].iloc[-3]
+        if pd.notna(ma10_prev) and ma10 <= float(ma10_prev):
+            score_trend += 8
+
+    # (2) 動能分 25：空方動能
+    score_momentum = 0
+    if -15 <= chg_5d_pct <= -3:
+        score_momentum += 15
+    elif -3 < chg_5d_pct <= 0:
+        score_momentum += 8
+    elif chg_5d_pct < -15:
+        score_momentum += 4
+    bar_range = high - low
+    close_pos = (close - low) / bar_range if bar_range > 0 else 0.5
+    if close_pos <= 0.3:
+        score_momentum += 10
+
+    # (3) 量價分 20
+    score_volume = 0
+    vol_ratio_20 = vol / vol20 if vol20 > 0 else 1.0
+    is_black = close < open_
+    if is_black and 1.2 <= vol_ratio_20 <= 3.0:
+        score_volume += 12
+    elif is_black and 0.9 <= vol_ratio_20 < 1.2:
+        score_volume += 6
+    tail3 = df.tail(3)
+    t3_close = pd.to_numeric(tail3["Close"], errors="coerce")
+    t3_open = pd.to_numeric(tail3["Open"], errors="coerce")
+    t3_vol = pd.to_numeric(tail3["Volume"], errors="coerce").fillna(0)
+    dn_vols, up_vols = [], []
+    for i in range(len(tail3)):
+        c_i, o_i, v_i = float(t3_close.iloc[i]), float(t3_open.iloc[i]), float(t3_vol.iloc[i])
+        if c_i < o_i:
+            dn_vols.append(v_i)
+        else:
+            up_vols.append(v_i)
+    avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
+    avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
+    if avg_dn > avg_up and dn_vols:
+        score_volume += 8
+
+    # (4) 籌碼分 15
+    score_chip = 0
+    has_inst = False
+    foreign_val = float(item.get("外資買賣超", 0) or 0)
+    trust_val = float(item.get("投信買賣超", 0) or 0)
+    if foreign_val != 0 or trust_val != 0:
+        has_inst = True
+        if foreign_val < 0:
+            score_chip += 6
+        if trust_val < 0:
+            score_chip += 6
+        if foreign_val < 0 and trust_val < 0:
+            score_chip += 3
+    if not has_inst:
+        avg_val_3 = float((close_s.tail(3) * vol_s.tail(3)).mean()) / 1e8
+        if avg_val_3 < avg_value_20:
+            score_chip += 15
+
+    # (5) 風險扣分 -20
+    score_risk = 0
+    lower_shadow = min(close, open_) - low
+    if bar_range > 0 and lower_shadow / bar_range > 0.45:
+        score_risk -= 8
+    is_green = close > open_
+    if is_green and vol > vol20 * 1.5:
+        score_risk -= 10
+    if ma5 > 0 and (ma5 - close) / ma5 > 0.08:
+        score_risk -= 6
+
+    total = score_trend + score_momentum + score_volume + score_chip + score_risk
+    total = max(0, min(100, total))
+
+    reasons = []
+    if score_trend >= 22:
+        reasons.append("空方趨勢強")
+    if chg_5d_pct <= -3:
+        reasons.append(f"5日跌{chg_5d_pct:.1f}%")
+    if is_black and vol_ratio_20 >= 1.2:
+        reasons.append(f"黑K量比{vol_ratio_20:.1f}倍")
+    if foreign_val < 0:
+        reasons.append("外資賣")
+    if trust_val < 0:
+        reasons.append("投信賣")
+    if not reasons:
+        reasons.append("綜合評分")
+
+    warnings = []
+    if score_risk < 0:
+        if bar_range > 0 and lower_shadow / bar_range > 0.45:
+            warnings.append("長下影")
+        if is_green and vol > vol20 * 1.5:
+            warnings.append("爆量紅K")
+        if ma5 > 0 and (ma5 - close) / ma5 > 0.08:
+            warnings.append("離MA5過遠")
+
+    return {
+        "short_total": total,
+        "short_trend": score_trend,
+        "short_momentum": score_momentum,
+        "short_volume": score_volume,
+        "short_chip": score_chip,
+        "short_risk": score_risk,
+        "short_reason": "、".join(reasons[:4]),
+        "short_warning": "、".join(warnings) if warnings else "",
+        "short_chg5d": round(chg_5d_pct, 2),
+        "short_vol_ratio": round(vol_ratio_20, 2),
+        "short_close_pos": round(close_pos, 2),
+    }
+
+
 def auto_pick_general_score(item: dict) -> float:
     score = 0.0
     inst_score = float(item.get("法人分數", 0) or 0)
@@ -7323,58 +7498,71 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 with st.expander("法人欄位值偵錯", expanded=False):
                     st.json({k: ("--" if (isinstance(v, float) and pd.isna(v)) else v) for k, v in raw_inst_debug.items()})
 
-            st.markdown("#### 做多評分")
+            st.markdown("#### 綜合評分")
             df_chart = get_symbol_indicator_chart(st.session_state.selected_code)
             row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
             long_metrics = long_pick_compute(df_chart, row_dict) if df_chart is not None and not df_chart.empty else None
+            short_metrics = short_pick_compute(df_chart, row_dict) if df_chart is not None and not df_chart.empty else None
 
-            if long_metrics is not None:
+            def _render_score_panel(prefix, label, metrics, threshold=60):
+                key_total = f"{prefix}_total"
+                key_trend = f"{prefix}_trend"
+                key_mom = f"{prefix}_momentum"
+                key_vol = f"{prefix}_volume"
+                key_chip = f"{prefix}_chip"
+                key_risk = f"{prefix}_risk"
+                key_reason = f"{prefix}_reason"
+                key_warning = f"{prefix}_warning"
+                key_chg5d = f"{prefix}_chg5d"
+                key_vol_ratio = f"{prefix}_vol_ratio"
+
                 if st.session_state.mobile_mode:
-                    bd1, bd2 = st.columns(2)
-                    bd1.metric("做多總分", str(long_metrics["long_total"]))
-                    bd2.metric("入選原因", long_metrics["long_reason"])
-                    bd3, bd4, bd5 = st.columns(3)
-                    bd3.metric("趨勢分", f'{long_metrics["long_trend"]}/30')
-                    bd4.metric("動能分", f'{long_metrics["long_momentum"]}/25')
-                    bd5.metric("量價分", f'{long_metrics["long_volume"]}/20')
-                    bd6, bd7 = st.columns(2)
-                    bd6.metric("籌碼分", f'{long_metrics["long_chip"]}/15')
-                    bd7.metric("風險扣分", f'{long_metrics["long_risk"]}')
+                    m1, m2 = st.columns(2)
+                    m1.metric(f"{label}總分", str(metrics[key_total]))
+                    m2.metric("入選原因", metrics[key_reason])
+                    m3, m4, m5 = st.columns(3)
+                    m3.metric("趨勢", f'{metrics[key_trend]}/30')
+                    m4.metric("動能", f'{metrics[key_mom]}/25')
+                    m5.metric("量價", f'{metrics[key_vol]}/20')
+                    m6, m7 = st.columns(2)
+                    m6.metric("籌碼", f'{metrics[key_chip]}/15')
+                    m7.metric("風險", f'{metrics[key_risk]}')
                 else:
-                    bd1, bd2, bd3, bd4, bd5, bd6 = st.columns(6)
-                    bd1.metric("做多總分", str(long_metrics["long_total"]))
-                    bd2.metric("趨勢", f'{long_metrics["long_trend"]}/30')
-                    bd3.metric("動能", f'{long_metrics["long_momentum"]}/25')
-                    bd4.metric("量價", f'{long_metrics["long_volume"]}/20')
-                    bd5.metric("籌碼", f'{long_metrics["long_chip"]}/15')
-                    bd6.metric("風險", f'{long_metrics["long_risk"]}')
-                with st.expander("展開評分明細", expanded=False):
+                    m1, m2, m3, m4, m5, m6 = st.columns(6)
+                    m1.metric(f"{label}總分", str(metrics[key_total]))
+                    m2.metric("趨勢", f'{metrics[key_trend]}/30')
+                    m3.metric("動能", f'{metrics[key_mom]}/25')
+                    m4.metric("量價", f'{metrics[key_vol]}/20')
+                    m5.metric("籌碼", f'{metrics[key_chip]}/15')
+                    m6.metric("風險", f'{metrics[key_risk]}')
+                risk_label = "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)" if prefix == "long" else "長下影(-8), 爆量紅K(-10), 離MA5過遠(-6)"
+                with st.expander(f"展開{label}評分明細", expanded=False):
                     detail_items = [
-                        {"項目": "趨勢分", "分數": long_metrics["long_trend"], "滿分": 30, "說明": "close>MA5(+8), close>MA10(+8), MA5>MA10(+6), MA10走平上彎(+8)"},
-                        {"項目": "動能分", "分數": long_metrics["long_momentum"], "滿分": 25, "說明": f'5日漲幅{long_metrics["long_chg5d"]:.1f}%'},
-                        {"項目": "量價分", "分數": long_metrics["long_volume"], "滿分": 20, "說明": f'量比20日={long_metrics["long_vol_ratio"]:.1f}倍'},
-                        {"項目": "籌碼分", "分數": long_metrics["long_chip"], "滿分": 15, "說明": "外資/投信買賣超或成交金額替代"},
-                        {"項目": "風險扣分", "分數": long_metrics["long_risk"], "滿分": 0, "說明": "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)"},
+                        {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30},
+                        {"項目": "動能分", "分數": metrics[key_mom], "滿分": 25, "說明": f'5日漲幅{metrics[key_chg5d]:.1f}%'},
+                        {"項目": "量價分", "分數": metrics[key_vol], "滿分": 20, "說明": f'量比20日={metrics[key_vol_ratio]:.1f}倍'},
+                        {"項目": "籌碼分", "分數": metrics[key_chip], "滿分": 15},
+                        {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": risk_label},
                     ]
                     st.dataframe(pd.DataFrame(detail_items), use_container_width=True, hide_index=True)
-                if long_metrics.get("long_warning"):
-                    st.caption(f'⚠️ 風險警示：{long_metrics["long_warning"]}')
-                if long_metrics["long_total"] >= 60:
-                    st.caption(f'✅ 做多總分 {long_metrics["long_total"]} ≥ 60，符合做多門檻')
+                if metrics.get(key_warning):
+                    st.caption(f'⚠️ 風險警示：{metrics[key_warning]}')
+                if metrics[key_total] >= threshold:
+                    st.caption(f'✅ {label}總分 {metrics[key_total]} ≥ {threshold}，符合{label}門檻')
                 else:
-                    st.caption(f'⚠️ 做多總分 {long_metrics["long_total"]} < 60，未達做多門檻')
-            else:
-                st.info("此檔不符合做多必要條件（收盤需 > MA5 > MA10、MA5 ≥ MA10、量能足夠）。")
-                breakdown = build_operation_rating_breakdown(df_chart, row_dict, market_info)
-                if st.session_state.mobile_mode:
-                    bd1, bd2 = st.columns(2)
-                    bd1.metric("舊系統評分", str(breakdown["final_score"]))
-                    bd2.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+                    st.caption(f'⚠️ {label}總分 {metrics[key_total]} < {threshold}，未達{label}門檻')
+
+            long_tab, short_tab = st.tabs(["📈 做多評分", "📉 做空評分"])
+            with long_tab:
+                if long_metrics is not None:
+                    _render_score_panel("long", "做多", long_metrics)
                 else:
-                    bd1, bd2, bd3 = st.columns(3)
-                    bd1.metric("舊系統評分", str(breakdown["final_score"]))
-                    bd2.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
-                    bd3.metric("盤前建議", str(row.get("盤前建議", "--")))
+                    st.info("不符合做多必要條件（收盤需 > MA5 > MA10、MA5 ≥ MA10）")
+            with short_tab:
+                if short_metrics is not None:
+                    _render_score_panel("short", "做空", short_metrics)
+                else:
+                    st.info("不符合做空必要條件（需跌破均線、弱勢結構）")
             st.markdown("#### 策略區")
             st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
 
@@ -7565,7 +7753,7 @@ if st.session_state.current_page == "分析中心":
             auto_pick_mode = st.selectbox("自動挑股模式", ["做多模式", "做空模式"], index=0)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
-        st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分，篩選實戰可操作標的；做空模式：偏弱勢結構、價跌量增、反彈不過壓力")
+        st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分；做空模式：總分≥60，同架構反向評分，篩選實戰可操作標的")
         st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
@@ -7670,21 +7858,33 @@ if st.session_state.current_page == "分析中心":
                 st.session_state.analysis_mode = "auto"
 
             elif auto_pick_mode == "做空模式":
-                short_candidates = []
-                short_fallback = []
+                candidates = []
                 for item in source_candidates:
-                    item2 = item.copy()
-                    item2["策略模式"] = "做空模式"
-                    item2["空方風報比"] = calc_short_rr(item2)
-                    item2["_bearish_hits"] = bearish_signal_hits(item2)
-                    item2["_auto_mode_score"] = auto_pick_short_score(item2)
-                    item2["排名原因"] = build_short_auto_reason(item2)
-                    item2["排名分組"] = "S_空方優先" if item2["_auto_mode_score"] >= 90 else "S_空方觀察"
-                    short_fallback.append(item2)
-                    if item2["_bearish_hits"] >= 2 or item2["_auto_mode_score"] >= 60:
-                        short_candidates.append(item2)
-                active_short_pool = short_candidates if len(short_candidates) >= max(top_n, 5) else short_fallback
-                candidates = sorted(active_short_pool, key=lambda x: (x.get("_auto_mode_score", 0), x.get("空方風報比", 0), x.get("量比5日", 0)), reverse=True)
+                    code = item.get("_code", item.get("股票代碼", ""))
+                    try:
+                        df_chart = get_symbol_indicator_chart(code)
+                    except Exception:
+                        df_chart = None
+                    metrics = short_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
+                    if metrics is None:
+                        continue
+                    if metrics["short_total"] < 60:
+                        continue
+                    item = item.copy()
+                    item["策略模式"] = "做空模式"
+                    item["_auto_mode_score"] = metrics["short_total"]
+                    item["做空總分"] = metrics["short_total"]
+                    item["趨勢分"] = metrics["short_trend"]
+                    item["動能分"] = metrics["short_momentum"]
+                    item["量價分"] = metrics["short_volume"]
+                    item["籌碼分"] = metrics["short_chip"]
+                    item["風險扣分"] = metrics["short_risk"]
+                    item["入選原因"] = metrics["short_reason"]
+                    item["風險警示"] = metrics["short_warning"]
+                    item["5日漲幅%"] = metrics["short_chg5d"]
+                    item["量比20日"] = metrics["short_vol_ratio"]
+                    candidates.append(item)
+                candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
             else:
                 candidates = []
                 for item in source_candidates:
@@ -8029,20 +8229,21 @@ if st.session_state.current_page == "分析中心":
             pool_caption = f"｜候選池：{layer_meta.get('selected_mode', '手動/未記錄')}" if layer_meta else ""
             sort_c2.caption(f"目前排序：{sort_label}｜模式：{board_mode}{pool_caption}")
 
-            if is_short_board:
+            has_new_score = ("做多總分" in sorted_df.columns and sorted_df["做多總分"].notna().any()) or \
+                           ("做空總分" in sorted_df.columns and sorted_df["做空總分"].notna().any())
+            score_col_name = "做空總分" if is_short_board else "做多總分"
+            if has_new_score:
+                if st.session_state.mobile_mode:
+                    core_cols = ["股票", "收盤", score_col_name, "趨勢分", "動能分", "量價分", "入選原因", "風險警示"]
+                else:
+                    core_cols = ["股票", "收盤", score_col_name, "趨勢分", "動能分", "量價分", "籌碼分", "風險扣分", "5日漲幅%", "量比20日", "入選原因", "風險警示"]
+                detail_cols = ["進場", "停損", "短期壓力", "風報比", "結論", "交易訊號", "RSI", "KD_K", "量能變化%", "量比5日"]
+            elif is_short_board:
                 core_cols = ["股票", "收盤", "空方建議進場", "空方停損", "空方短期壓力", "空方中繼目標", "空方風報比", "結論", "交易訊號"]
                 detail_cols = ["空方短期支撐", "空方跌破目標", "_bearish_hits", "價量結論", "價量燈號", "量能變化", "量能變化%", "量比5日", "排名分組", "排名原因", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值"]
             else:
-                has_long_score = "做多總分" in sorted_df.columns and sorted_df["做多總分"].notna().any()
-                if has_long_score:
-                    if st.session_state.mobile_mode:
-                        core_cols = ["股票", "收盤", "做多總分", "趨勢分", "動能分", "量價分", "入選原因", "風險警示"]
-                    else:
-                        core_cols = ["股票", "收盤", "做多總分", "趨勢分", "動能分", "量價分", "籌碼分", "風險扣分", "5日漲幅%", "量比20日", "入選原因", "風險警示"]
-                    detail_cols = ["進場", "停損", "短期壓力", "風報比", "結論", "交易訊號", "RSI", "KD_K", "量能變化%", "量比5日"]
-                else:
-                    core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
-                    detail_cols = ["支撐", "排名分組", "排名原因", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_DIF", "MACD_DEA", "MACD_BAR", "乖離率5日", "量能變化", "量能變化%", "量比5日", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值", "TWSE漲跌價差", "TWSE成交筆數", "TWSE收盤差異"]
+                core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
+                detail_cols = ["支撐", "排名分組", "排名原因", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_DIF", "MACD_DEA", "MACD_BAR", "乖離率5日", "量能變化", "量能變化%", "量比5日", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值", "TWSE漲跌價差", "TWSE成交筆數", "TWSE收盤差異"]
             sorted_df = ensure_dataframe_columns(sorted_df, list(dict.fromkeys(core_cols + detail_cols)))
             st.dataframe(sorted_df[core_cols], use_container_width=True, hide_index=True)
 
