@@ -564,7 +564,7 @@ def _filter_pool_with_official_snapshot(code_list, max_price: float = 1100.0, ta
     return pool[:target_count] if target_count else pool
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def build_candidate_pool_250(name_map: dict, max_price: float = 1100.0, target_count: int = 250, seed_list=None):
     ordered_codes = _ordered_candidate_codes(name_map, seed_list=seed_list)
     uniq = []
@@ -580,7 +580,7 @@ def build_candidate_pool_250(name_map: dict, max_price: float = 1100.0, target_c
     return uniq[:target_count] if target_count else uniq
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def build_candidate_core_pool(name_map: dict, max_price: float = 1100.0):
     ordered_codes = _ordered_candidate_codes(name_map, seed_list=watchlist_default)
     uniq = []
@@ -594,7 +594,7 @@ def build_candidate_core_pool(name_map: dict, max_price: float = 1100.0):
     return uniq
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def build_candidate_pool_layers(name_map: dict, max_price: float = 1100.0, expanded_target: int = 250):
     core_pool = build_candidate_core_pool(name_map, max_price=max_price)
     full_pool = build_candidate_pool_250(name_map, max_price=max_price, target_count=expanded_target, seed_list=watchlist_default)
