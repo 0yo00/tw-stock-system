@@ -1820,18 +1820,18 @@ def _fetch_tpex_openapi_three_insti_recent_v149(days_back: int = 14):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_institutional_bundle_all():
+    import time as _inst_time
+    _inst_deadline = _inst_time.time() + 15
     source_groups = [
         ('TWSE', [
-            ('TWSE_T86_HTML', lambda: _fetch_twse_t86_html_recent_v137(14)),
-            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(14)),
-            ('TWSE_RWD_JSON', lambda: _fetch_twse_t86_json_recent_v137(14)),
             ('TWSE_OPENAPI_TWT38U_ALL', lambda: _fetch_twse_openapi_rows_v137('fund/TWT38U_ALL')),
             ('TWSE_OPENAPI_T86', lambda: _fetch_twse_openapi_rows_v137('fund/T86')),
+            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(1)),
+            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(1)),
         ]),
         ('TPEx', [
-            ('TPEX_MAINBOARD_DAY_HTML', lambda: _fetch_tpex_mainboard_daily_html_recent_v149(14)),
-            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(14)),
-            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(14)),
+            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(1)),
+            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(1)),
         ]),
     ]
     debug_rows = []
@@ -1839,6 +1839,11 @@ def fetch_institutional_bundle_all():
     chosen_sources = {'TWSE': 'NONE', 'TPEx': 'NONE'}
     for market_name, attempts in source_groups:
         for source_name, loader in attempts:
+            if final_maps[market_name]:
+                break
+            if _inst_time.time() > _inst_deadline:
+                debug_rows.append({'市場': market_name, '來源': source_name, '狀態': '超時跳過', '原始筆數': 0, '解析命中': 0, '示例代碼': '', 'URL': '', 'HTTP': '', '預覽': '', '錯誤': '15s deadline exceeded'})
+                continue
             loader_error = ''
             fetch_attempts = []
             try:
