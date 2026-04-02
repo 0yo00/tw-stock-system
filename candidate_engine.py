@@ -213,13 +213,13 @@ def build_short_strategy(row: dict):
     short_stop = max(short_resistance * 1.02, breakout if breakout > 0 else 0)
     short_stop = round(short_stop, 2) if short_stop > 0 else ""
 
-    short_mid = round(short_support, 2) if short_support > 0 else ""
-
     if short_resistance > 0 and short_support > 0:
         width = short_resistance - short_support
+        short_mid = round(max(0.0, short_support - width * 0.5), 2) if width > 0 else round(short_support * 0.97, 2)
         short_break = round(max(0.0, short_support - width), 2)
     else:
-        short_break = ""
+        short_mid = round(short_support * 0.97, 2) if short_support > 0 else ""
+        short_break = round(short_support * 0.94, 2) if short_support > 0 else ""
 
     return {
         "空方短期壓力": round(short_resistance, 2) if short_resistance > 0 else "",
