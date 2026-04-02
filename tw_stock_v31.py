@@ -7323,26 +7323,58 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 with st.expander("法人欄位值偵錯", expanded=False):
                     st.json({k: ("--" if (isinstance(v, float) and pd.isna(v)) else v) for k, v in raw_inst_debug.items()})
 
-            st.markdown("#### 操作評級拆解")
+            st.markdown("#### 做多評分")
             df_chart = get_symbol_indicator_chart(st.session_state.selected_code)
-            breakdown = build_operation_rating_breakdown(df_chart, row.to_dict() if hasattr(row, "to_dict") else dict(row), market_info)
-            if st.session_state.mobile_mode:
-                bd1, bd2 = st.columns(2)
-                bd1.metric("基本分", str(breakdown["base_score"]))
-                bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
-                bd3, bd4 = st.columns(2)
-                bd3.metric("最終評分", str(breakdown["final_score"]))
-                bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+            row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            long_metrics = long_pick_compute(df_chart, row_dict) if df_chart is not None and not df_chart.empty else None
+
+            if long_metrics is not None:
+                if st.session_state.mobile_mode:
+                    bd1, bd2 = st.columns(2)
+                    bd1.metric("做多總分", str(long_metrics["long_total"]))
+                    bd2.metric("入選原因", long_metrics["long_reason"])
+                    bd3, bd4, bd5 = st.columns(3)
+                    bd3.metric("趨勢分", f'{long_metrics["long_trend"]}/30')
+                    bd4.metric("動能分", f'{long_metrics["long_momentum"]}/25')
+                    bd5.metric("量價分", f'{long_metrics["long_volume"]}/20')
+                    bd6, bd7 = st.columns(2)
+                    bd6.metric("籌碼分", f'{long_metrics["long_chip"]}/15')
+                    bd7.metric("風險扣分", f'{long_metrics["long_risk"]}')
+                else:
+                    bd1, bd2, bd3, bd4, bd5, bd6 = st.columns(6)
+                    bd1.metric("做多總分", str(long_metrics["long_total"]))
+                    bd2.metric("趨勢", f'{long_metrics["long_trend"]}/30')
+                    bd3.metric("動能", f'{long_metrics["long_momentum"]}/25')
+                    bd4.metric("量價", f'{long_metrics["long_volume"]}/20')
+                    bd5.metric("籌碼", f'{long_metrics["long_chip"]}/15')
+                    bd6.metric("風險", f'{long_metrics["long_risk"]}')
+                with st.expander("展開評分明細", expanded=False):
+                    detail_items = [
+                        {"項目": "趨勢分", "分數": long_metrics["long_trend"], "滿分": 30, "說明": "close>MA5(+8), close>MA10(+8), MA5>MA10(+6), MA10走平上彎(+8)"},
+                        {"項目": "動能分", "分數": long_metrics["long_momentum"], "滿分": 25, "說明": f'5日漲幅{long_metrics["long_chg5d"]:.1f}%'},
+                        {"項目": "量價分", "分數": long_metrics["long_volume"], "滿分": 20, "說明": f'量比20日={long_metrics["long_vol_ratio"]:.1f}倍'},
+                        {"項目": "籌碼分", "分數": long_metrics["long_chip"], "滿分": 15, "說明": "外資/投信買賣超或成交金額替代"},
+                        {"項目": "風險扣分", "分數": long_metrics["long_risk"], "滿分": 0, "說明": "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)"},
+                    ]
+                    st.dataframe(pd.DataFrame(detail_items), use_container_width=True, hide_index=True)
+                if long_metrics.get("long_warning"):
+                    st.caption(f'⚠️ 風險警示：{long_metrics["long_warning"]}')
+                if long_metrics["long_total"] >= 60:
+                    st.caption(f'✅ 做多總分 {long_metrics["long_total"]} ≥ 60，符合做多門檻')
+                else:
+                    st.caption(f'⚠️ 做多總分 {long_metrics["long_total"]} < 60，未達做多門檻')
             else:
-                bd1, bd2, bd3, bd4 = st.columns(4)
-                bd1.metric("基本分", str(breakdown["base_score"]))
-                bd2.metric("大盤加權後", str(max(0, breakdown["base_score"] + breakdown["market_adj"])))
-                bd3.metric("最終評分", str(breakdown["final_score"]))
-                bd4.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
-            score_df = pd.DataFrame(breakdown["base_items"] + breakdown["extra_items"])
-            with st.expander("展開評分加減明細", expanded=False):
-                st.dataframe(score_df, use_container_width=True, hide_index=True)
-            st.caption("評級順序：先算基本分，再加上大盤與法人分數，最後依突破狀態、突破強度、風報比、盤前偏向做修正。")
+                st.info("此檔不符合做多必要條件（收盤需 > MA5 > MA10、MA5 ≥ MA10、量能足夠）。")
+                breakdown = build_operation_rating_breakdown(df_chart, row_dict, market_info)
+                if st.session_state.mobile_mode:
+                    bd1, bd2 = st.columns(2)
+                    bd1.metric("舊系統評分", str(breakdown["final_score"]))
+                    bd2.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+                else:
+                    bd1, bd2, bd3 = st.columns(3)
+                    bd1.metric("舊系統評分", str(breakdown["final_score"]))
+                    bd2.metric("操作評級", f"{breakdown['star']} / {breakdown['action']}")
+                    bd3.metric("盤前建議", str(row.get("盤前建議", "--")))
             st.markdown("#### 策略區")
             st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
 
@@ -8001,8 +8033,16 @@ if st.session_state.current_page == "分析中心":
                 core_cols = ["股票", "收盤", "空方建議進場", "空方停損", "空方短期壓力", "空方中繼目標", "空方風報比", "結論", "交易訊號"]
                 detail_cols = ["空方短期支撐", "空方跌破目標", "_bearish_hits", "價量結論", "價量燈號", "量能變化", "量能變化%", "量比5日", "排名分組", "排名原因", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值"]
             else:
-                core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
-                detail_cols = ["支撐", "排名分組", "排名原因", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_DIF", "MACD_DEA", "MACD_BAR", "乖離率5日", "量能變化", "量能變化%", "量比5日", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值", "TWSE漲跌價差", "TWSE成交筆數", "TWSE收盤差異"]
+                has_long_score = "做多總分" in sorted_df.columns and sorted_df["做多總分"].notna().any()
+                if has_long_score:
+                    if st.session_state.mobile_mode:
+                        core_cols = ["股票", "收盤", "做多總分", "趨勢分", "動能分", "量價分", "入選原因", "風險警示"]
+                    else:
+                        core_cols = ["股票", "收盤", "做多總分", "趨勢分", "動能分", "量價分", "籌碼分", "風險扣分", "5日漲幅%", "量比20日", "入選原因", "風險警示"]
+                    detail_cols = ["進場", "停損", "短期壓力", "風報比", "結論", "交易訊號", "RSI", "KD_K", "量能變化%", "量比5日"]
+                else:
+                    core_cols = get_analysis_core_columns(st.session_state.mobile_mode)
+                    detail_cols = ["支撐", "排名分組", "排名原因", "RSI", "KD_K", "KD_D", "KDJ_J", "MACD_DIF", "MACD_DEA", "MACD_BAR", "乖離率5日", "量能變化", "量能變化%", "量比5日", "TWSE日期", "TWSE名稱", "TWSE成交量", "TWSE成交值", "TWSE漲跌價差", "TWSE成交筆數", "TWSE收盤差異"]
             sorted_df = ensure_dataframe_columns(sorted_df, list(dict.fromkeys(core_cols + detail_cols)))
             st.dataframe(sorted_df[core_cols], use_container_width=True, hide_index=True)
 
