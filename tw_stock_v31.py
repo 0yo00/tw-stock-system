@@ -243,6 +243,120 @@ def inject_responsive_css():
         font-size: 0.8rem;
         margin-bottom: 0.5rem;
     }
+    .lp-hero {
+        text-align: center;
+        padding: 3.5rem 1.2rem 2.5rem;
+        background: linear-gradient(180deg, rgba(59,130,246,0.12) 0%, rgba(15,23,42,0) 100%);
+        border-radius: 24px;
+        margin-bottom: 2rem;
+    }
+    .lp-hero h1 {
+        font-size: 2.2rem !important;
+        font-weight: 900;
+        background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #f472b6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.6rem;
+        line-height: 1.2;
+    }
+    .lp-hero .lp-sub {
+        font-size: 1.1rem;
+        color: #94a3b8;
+        margin-bottom: 0.3rem;
+    }
+    .lp-hero .lp-desc {
+        font-size: 0.9rem;
+        color: #64748b;
+        margin-bottom: 1.8rem;
+    }
+    .lp-section-title {
+        font-size: 1.15rem;
+        font-weight: 800;
+        color: #e2e8f0;
+        margin-bottom: 0.8rem;
+        padding-left: 0.2rem;
+    }
+    .lp-card {
+        border: 1px solid rgba(148,163,184,0.14);
+        background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+        border-radius: 18px;
+        padding: 1.4rem 1.2rem;
+        margin-bottom: 0.8rem;
+        transition: border-color 0.2s;
+    }
+    .lp-card:hover {
+        border-color: rgba(96,165,250,0.4);
+    }
+    .lp-card-icon {
+        font-size: 1.8rem;
+        margin-bottom: 0.5rem;
+    }
+    .lp-card-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #f1f5f9;
+        margin-bottom: 0.3rem;
+    }
+    .lp-card-desc {
+        font-size: 0.85rem;
+        color: #94a3b8;
+        line-height: 1.5;
+    }
+    .lp-stat-card {
+        border: 1px solid rgba(148,163,184,0.14);
+        background: rgba(255,255,255,0.025);
+        border-radius: 16px;
+        padding: 1.1rem 1rem;
+        text-align: center;
+    }
+    .lp-stat-value {
+        font-size: 1.6rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
+    .lp-stat-label {
+        font-size: 0.78rem;
+        color: #64748b;
+        margin-top: 0.2rem;
+    }
+    .lp-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 1.2rem;
+    }
+    .lp-step-num {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 1rem;
+        color: white;
+        flex-shrink: 0;
+    }
+    .lp-step-text h4 {
+        margin: 0 0 0.2rem 0;
+        font-size: 0.98rem;
+        color: #e2e8f0;
+    }
+    .lp-step-text p {
+        margin: 0;
+        font-size: 0.84rem;
+        color: #94a3b8;
+    }
+    .lp-divider {
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(148,163,184,0.2), transparent);
+        margin: 2rem 0;
+    }
+    @media (max-width: 900px) {
+        .lp-hero { padding: 2.5rem 0.8rem 2rem; }
+        .lp-hero h1 { font-size: 1.75rem !important; }
+    }
     .rank-chip {
         display: inline-block;
         padding: 0.2rem 0.45rem;
@@ -4873,13 +4987,125 @@ if "user_list" not in st.session_state:
 if "current_user" not in st.session_state:
     st.session_state.current_user = st.session_state.user_list[0] if st.session_state.user_list else DEFAULT_USERS[0]
 if "current_page" not in st.session_state:
-    st.session_state.current_page = "分析中心"
+    st.session_state.current_page = "首頁"
 if "position_result" not in st.session_state:
     st.session_state.position_result = None
 if "position_stock_input" not in st.session_state:
     st.session_state.position_stock_input = ""
 
 inject_responsive_css()
+
+
+def render_landing_page():
+    st.markdown("""
+    <div class="lp-hero">
+        <h1>台股短線系統</h1>
+        <div class="lp-sub">AI 驅動的台股短線交易分析平台</div>
+        <div class="lp-desc">做多 / 做空雙模式自動挑股　｜　100 分制綜合評分　｜　即時法人籌碼</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📈  開始分析", use_container_width=True, type="primary"):
+            st.session_state.current_page = "分析中心"
+            st.rerun()
+    with c2:
+        if st.button("📊  市場總覽", use_container_width=True):
+            st.session_state.current_page = "市場儀表板"
+            st.rerun()
+
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">🧩 核心功能</div>', unsafe_allow_html=True)
+
+    features = [
+        ("🎯", "自動挑股", "做多 / 做空雙模式，趨勢＋動能＋量價＋籌碼＋風險五維評分，60 分以上入選"),
+        ("🔍", "單股分析", "輸入股票代碼即時分析，完整技術面＋法人籌碼＋進出場策略"),
+        ("📸", "快照中心", "盤前建立快照，盤後對照比較，追蹤分析準確度"),
+        ("💼", "持倉中心", "即時持倉追蹤、損益計算、當沖優先判讀"),
+    ]
+    for icon, title, desc in features:
+        st.markdown(f"""
+        <div class="lp-card">
+            <div class="lp-card-icon">{icon}</div>
+            <div class="lp-card-title">{title}</div>
+            <div class="lp-card-desc">{desc}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">📡 今日大盤</div>', unsafe_allow_html=True)
+
+    try:
+        mi = market_filter()
+        s1, s2 = st.columns(2)
+        with s1:
+            st.markdown(f"""
+            <div class="lp-stat-card">
+                <div class="lp-stat-value">{mi['close']:.0f}</div>
+                <div class="lp-stat-label">加權指數</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with s2:
+            color = "#4ade80" if "多" in mi.get("label", "") else "#f87171" if "空" in mi.get("label", "") else "#fbbf24"
+            st.markdown(f"""
+            <div class="lp-stat-card">
+                <div class="lp-stat-value" style="color:{color};">{mi.get('label', '--')}</div>
+                <div class="lp-stat-label">大盤濾網</div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.caption(mi.get("text", ""))
+    except Exception:
+        st.info("大盤資料載入中...")
+
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">🚀 快速入口</div>', unsafe_allow_html=True)
+
+    q1, q2 = st.columns(2)
+    with q1:
+        if st.button("📈 做多挑股", use_container_width=True):
+            st.session_state.current_page = "分析中心"
+            st.rerun()
+    with q2:
+        if st.button("📉 做空挑股", use_container_width=True):
+            st.session_state.current_page = "分析中心"
+            st.rerun()
+    q3, q4 = st.columns(2)
+    with q3:
+        if st.button("📸 快照中心", use_container_width=True):
+            st.session_state.current_page = "快照中心"
+            st.rerun()
+    with q4:
+        if st.button("💼 持倉中心", use_container_width=True):
+            st.session_state.current_page = "持倉中心"
+            st.rerun()
+
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">⚡ 使用流程</div>', unsafe_allow_html=True)
+
+    steps = [
+        ("1", "選擇模式", "做多或做空，系統自動從 250 檔候選池篩選"),
+        ("2", "自動評分", "趨勢 / 動能 / 量價 / 籌碼 / 風險 五維度 100 分制"),
+        ("3", "查看結果", "總分排序，每檔附帶入選原因、風險警示、進出場策略"),
+        ("4", "深入分析", "點進單股查看完整技術面、法人資料、K線圖"),
+    ]
+    for num, title, desc in steps:
+        st.markdown(f"""
+        <div class="lp-step">
+            <div class="lp-step-num">{num}</div>
+            <div class="lp-step-text">
+                <h4>{title}</h4>
+                <p>{desc}</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style="text-align:center;padding:1rem 0 2rem;color:#475569;font-size:0.8rem;">
+        台股短線系統 {APP_VERSION}　｜　資料來源：Yahoo Finance / TWSE / TPEx
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_global_banner():
@@ -4894,8 +5120,8 @@ def render_global_banner():
     )
 
 with st.sidebar:
-    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION} 當沖優先版</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">延續正式版主線；持倉中心改成當沖優先判讀，當實際虧損超過警戒門檻時，直接以部位風控優先，不再讓技術位置判讀淡化風險。</div></div>', unsafe_allow_html=True)
-    page_list = ["分析中心", "市場儀表板", "快照中心", "持倉中心"]
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION}</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">AI 驅動短線交易分析平台</div></div>', unsafe_allow_html=True)
+    page_list = ["首頁", "分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
     page_choice = st.radio("功能區", page_list, index=page_list.index(st.session_state.current_page), label_visibility="collapsed")
@@ -7682,7 +7908,11 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     col.metric(label, value)
 
 
-render_global_banner()
+if st.session_state.current_page == "首頁":
+    render_landing_page()
+
+if st.session_state.current_page != "首頁":
+    render_global_banner()
 
 if st.session_state.current_page == "分析中心":
     st.markdown('<div class="main-shell"><h3>📈 分析中心</h3><p>正式版分析工作區：集中處理個股搜尋、自動挑股、補資料命中與單股判讀。V149 直補 TPEx 法人主頁 / OpenAPI 來源，並保留盤前嚴格流動性門檻。</p></div>', unsafe_allow_html=True)
