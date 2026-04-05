@@ -380,6 +380,17 @@ def inject_responsive_css():
     .lp-news-badge.neutral { background: rgba(251,191,36,0.12); color: #fbbf24; }
     .lp-news-title { font-size: 0.88rem; color: #e2e8f0; font-weight: 500; line-height: 1.45; }
     .lp-news-source { font-size: 0.7rem; color: #64748b; margin-top: 0.2rem; }
+    .lp-state-card {
+        border: 1px solid rgba(148,163,184,0.1);
+        border-radius: 18px;
+        padding: 1.6rem 1.3rem;
+        text-align: center;
+    }
+    .lp-state-card.empty { background: rgba(255,255,255,0.02); }
+    .lp-state-card.error { background: rgba(239,68,68,0.04); border-color: rgba(239,68,68,0.15); }
+    .lp-state-icon { font-size: 1.8rem; margin-bottom: 0.6rem; }
+    .lp-state-title { font-size: 1rem; font-weight: 700; color: #e2e8f0; margin-bottom: 0.35rem; }
+    .lp-state-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.5; }
     .lp-steps-compact {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -5322,36 +5333,55 @@ def render_landing_page():
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="lp-section-title">📰 今日重大新聞</div>', unsafe_allow_html=True)
 
+    _news_error = False
+    _news_items = None
     try:
-        news_items = get_stock_news("^TWII")
-        if not news_items:
-            news_items = get_stock_news("2330.TW")
-        if news_items:
-            for n in news_items[:5]:
-                title_text = n.get("title", "")
-                time_text = n.get("time", "")
-                source_text = n.get("publisher", "")
-                title_lower = title_text.lower()
-                if any(w in title_lower for w in ["漲", "多", "買", "升", "rally", "gain", "bull", "up", "high", "surge"]):
-                    badge_cls, badge_text = "bull", "偏多"
-                elif any(w in title_lower for w in ["跌", "空", "賣", "降", "fall", "drop", "bear", "down", "low", "crash", "sell"]):
-                    badge_cls, badge_text = "bear", "偏空"
-                else:
-                    badge_cls, badge_text = "neutral", "中性"
-                st.markdown(f"""
-                <div class="lp-news-item">
-                    <div class="lp-news-meta">
-                        <span class="lp-news-badge {badge_cls}">{badge_text}</span>
-                        <span class="lp-news-time">{time_text}</span>
-                    </div>
-                    <div class="lp-news-title">{title_text}</div>
-                    <div class="lp-news-source">{source_text}</div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.caption("目前沒有新的市場新聞。")
+        _news_items = get_stock_news("^TWII")
+        if not _news_items:
+            _news_items = get_stock_news("2330.TW")
     except Exception:
-        st.caption("新聞資料載入中...")
+        _news_error = True
+
+    if _news_error:
+        st.markdown("""
+        <div class="lp-state-card error">
+            <div class="lp-state-icon">⚠️</div>
+            <div class="lp-state-title">新聞載入失敗</div>
+            <div class="lp-state-desc">目前無法從資料來源取得新聞，可能是 API 暫時無回應，請稍後再試</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🔄 重新整理新聞", use_container_width=True, key="lp_news_retry"):
+            st.rerun()
+    elif _news_items:
+        for n in _news_items[:5]:
+            title_text = n.get("title", "")
+            time_text = n.get("time", "")
+            source_text = n.get("publisher", "")
+            title_lower = title_text.lower()
+            if any(w in title_lower for w in ["漲", "多", "買", "升", "rally", "gain", "bull", "up", "high", "surge"]):
+                badge_cls, badge_text = "bull", "偏多"
+            elif any(w in title_lower for w in ["跌", "空", "賣", "降", "fall", "drop", "bear", "down", "low", "crash", "sell"]):
+                badge_cls, badge_text = "bear", "偏空"
+            else:
+                badge_cls, badge_text = "neutral", "中性"
+            st.markdown(f"""
+            <div class="lp-news-item">
+                <div class="lp-news-meta">
+                    <span class="lp-news-badge {badge_cls}">{badge_text}</span>
+                    <span class="lp-news-time">{time_text}</span>
+                </div>
+                <div class="lp-news-title">{title_text}</div>
+                <div class="lp-news-source">{source_text}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="lp-state-card empty">
+            <div class="lp-state-icon">📭</div>
+            <div class="lp-state-title">今日暫無重大市場新聞</div>
+            <div class="lp-state-desc">目前未偵測到可列入首頁的重大事件</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── 操作流程（精簡版）──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
