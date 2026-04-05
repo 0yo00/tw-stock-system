@@ -338,9 +338,73 @@ def inject_responsive_css():
         box-shadow: 0 4px 24px rgba(59,130,246,0.12);
         transform: translateY(-1px);
     }
+    .lp-card { cursor: default; }
     .lp-card-icon { font-size: 1.6rem; margin-bottom: 0.55rem; }
     .lp-card-title { font-size: 1.02rem; font-weight: 700; color: #f1f5f9; margin-bottom: 0.35rem; }
     .lp-card-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.55; }
+    .lp-card-arrow {
+        position: absolute;
+        right: 1.1rem; top: 50%;
+        transform: translateY(-50%);
+        font-size: 1.1rem;
+        color: #475569;
+        transition: all 0.2s;
+    }
+    .lp-card:hover .lp-card-arrow { color: #60a5fa; transform: translateY(-50%) translateX(3px); }
+    .lp-news-item {
+        border: 1px solid rgba(148,163,184,0.1);
+        background: rgba(255,255,255,0.025);
+        border-radius: 14px;
+        padding: 0.9rem 1rem;
+        margin-bottom: 0.55rem;
+        transition: border-color 0.2s;
+    }
+    .lp-news-item:hover { border-color: rgba(96,165,250,0.3); }
+    .lp-news-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.35rem;
+        flex-wrap: wrap;
+    }
+    .lp-news-time { font-size: 0.72rem; color: #64748b; }
+    .lp-news-badge {
+        font-size: 0.68rem;
+        padding: 0.15rem 0.45rem;
+        border-radius: 999px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+    .lp-news-badge.bull { background: rgba(34,197,94,0.15); color: #4ade80; }
+    .lp-news-badge.bear { background: rgba(239,68,68,0.15); color: #f87171; }
+    .lp-news-badge.neutral { background: rgba(251,191,36,0.12); color: #fbbf24; }
+    .lp-news-title { font-size: 0.88rem; color: #e2e8f0; font-weight: 500; line-height: 1.45; }
+    .lp-news-source { font-size: 0.7rem; color: #64748b; margin-top: 0.2rem; }
+    .lp-steps-compact {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem;
+    }
+    .lp-step-compact {
+        border: 1px solid rgba(148,163,184,0.08);
+        border-radius: 14px;
+        padding: 0.75rem 0.85rem;
+        background: rgba(255,255,255,0.015);
+    }
+    .lp-step-compact-num {
+        display: inline-block;
+        width: 22px; height: 22px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+        text-align: center;
+        line-height: 22px;
+        font-size: 0.72rem;
+        font-weight: 800;
+        color: white;
+        margin-right: 0.4rem;
+    }
+    .lp-step-compact-title { font-size: 0.85rem; font-weight: 600; color: #e2e8f0; display: inline; }
+    .lp-step-compact-desc { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; line-height: 1.4; }
     .lp-strategy-panel {
         border: 1px solid rgba(148,163,184,0.12);
         background: linear-gradient(160deg, rgba(15,23,42,0.92) 0%, rgba(30,41,59,0.72) 100%);
@@ -5215,68 +5279,108 @@ def render_landing_page():
     except Exception:
         st.info("大盤資料載入中...")
 
-    # ── 核心功能 ──
+    # ── 核心功能（可點擊）──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="lp-section-title">🧩 核心功能</div>', unsafe_allow_html=True)
 
     features = [
-        ("🎯", "自動挑股", "做多 / 做空雙模式，趨勢＋動能＋量價＋籌碼＋風險五維評分，≥ 60 分入選"),
-        ("🔍", "單股分析", "輸入代碼即時運算，完整技術面＋法人籌碼＋進出場策略＋K線圖"),
-        ("📸", "快照中心", "盤前建立快照，盤後自動對照，追蹤每次分析的準確度"),
-        ("💼", "持倉中心", "即時持倉追蹤、損益計算、當沖優先判讀、風控預警"),
+        ("🎯", "自動挑股", "做多 / 做空雙模式，五維評分 ≥ 60 分入選", "分析中心", "lp_feat_auto"),
+        ("🔍", "單股分析", "輸入代碼即時運算，技術面＋法人＋策略", "分析中心", "lp_feat_manual"),
+        ("📸", "快照中心", "盤前快照，盤後對照，追蹤準確度", "快照中心", "lp_feat_snap"),
+        ("💼", "持倉中心", "持倉追蹤、損益計算、當沖判讀", "持倉中心", "lp_feat_pos"),
     ]
-    for icon, title, desc in features:
+    for icon, title, desc, page, key in features:
         st.markdown(f"""
         <div class="lp-card">
             <div class="lp-card-icon">{icon}</div>
             <div class="lp-card-title">{title}</div>
             <div class="lp-card-desc">{desc}</div>
+            <div class="lp-card-arrow">→</div>
         </div>
         """, unsafe_allow_html=True)
+        if st.button(f"進入{title}", use_container_width=True, key=key):
+            st.session_state.current_page = page
+            st.rerun()
 
-    # ── 快速入口 ──
+    # ── 快速入口（帶模式切換）──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">⚡ 快速入口</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">⚡ 一鍵操作</div>', unsafe_allow_html=True)
 
     q1, q2 = st.columns(2)
     with q1:
-        if st.button("📈 做多挑股", use_container_width=True):
+        if st.button("📈 做多挑股", use_container_width=True, type="primary"):
             st.session_state.current_page = "分析中心"
+            st.session_state["_landing_auto_mode"] = "做多模式"
             st.rerun()
     with q2:
-        if st.button("📉 做空挑股", use_container_width=True):
+        if st.button("📉 做空挑股", use_container_width=True, type="primary"):
             st.session_state.current_page = "分析中心"
-            st.rerun()
-    q3, q4 = st.columns(2)
-    with q3:
-        if st.button("📸 快照中心", use_container_width=True):
-            st.session_state.current_page = "快照中心"
-            st.rerun()
-    with q4:
-        if st.button("💼 持倉中心", use_container_width=True):
-            st.session_state.current_page = "持倉中心"
+            st.session_state["_landing_auto_mode"] = "做空模式"
             st.rerun()
 
-    # ── 使用流程 ──
+    # ── 今日重大新聞 ──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">🔄 操作流程</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">📰 今日重大新聞</div>', unsafe_allow_html=True)
 
-    steps = [
-        ("1", "選擇模式", "做多或做空，系統自動從 250 檔候選池開始篩選"),
-        ("2", "五維評分", "趨勢 / 動能 / 量價 / 籌碼 / 風險，總分 100 分制"),
-        ("3", "精選結果", "依總分排序，每檔附帶入選原因、風險警示、策略建議"),
-        ("4", "深入研究", "點進單股查看完整技術面、法人資料、K線圖表"),
-    ]
-    for num, title, desc in steps:
-        st.markdown(f"""
-        <div class="lp-step">
-            <div class="lp-step-num">{num}</div>
-            <div class="lp-step-text">
-                <h4>{title}</h4>
-                <p>{desc}</p>
-            </div>
+    try:
+        news_items = get_stock_news("^TWII")
+        if not news_items:
+            news_items = get_stock_news("2330.TW")
+        if news_items:
+            for n in news_items[:5]:
+                title_text = n.get("title", "")
+                time_text = n.get("time", "")
+                source_text = n.get("publisher", "")
+                title_lower = title_text.lower()
+                if any(w in title_lower for w in ["漲", "多", "買", "升", "rally", "gain", "bull", "up", "high", "surge"]):
+                    badge_cls, badge_text = "bull", "偏多"
+                elif any(w in title_lower for w in ["跌", "空", "賣", "降", "fall", "drop", "bear", "down", "low", "crash", "sell"]):
+                    badge_cls, badge_text = "bear", "偏空"
+                else:
+                    badge_cls, badge_text = "neutral", "中性"
+                st.markdown(f"""
+                <div class="lp-news-item">
+                    <div class="lp-news-meta">
+                        <span class="lp-news-badge {badge_cls}">{badge_text}</span>
+                        <span class="lp-news-time">{time_text}</span>
+                    </div>
+                    <div class="lp-news-title">{title_text}</div>
+                    <div class="lp-news-source">{source_text}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.caption("目前沒有新的市場新聞。")
+    except Exception:
+        st.caption("新聞資料載入中...")
+
+    # ── 操作流程（精簡版）──
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title" style="font-size:0.95rem;">🔄 操作流程</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="lp-steps-compact">
+        <div class="lp-step-compact">
+            <span class="lp-step-compact-num">1</span>
+            <span class="lp-step-compact-title">選擇模式</span>
+            <div class="lp-step-compact-desc">做多或做空自動篩選</div>
         </div>
-        """, unsafe_allow_html=True)
+        <div class="lp-step-compact">
+            <span class="lp-step-compact-num">2</span>
+            <span class="lp-step-compact-title">五維評分</span>
+            <div class="lp-step-compact-desc">100 分制綜合評級</div>
+        </div>
+        <div class="lp-step-compact">
+            <span class="lp-step-compact-num">3</span>
+            <span class="lp-step-compact-title">精選結果</span>
+            <div class="lp-step-compact-desc">總分排序＋策略建議</div>
+        </div>
+        <div class="lp-step-compact">
+            <span class="lp-step-compact-num">4</span>
+            <span class="lp-step-compact-title">深入研究</span>
+            <div class="lp-step-compact-desc">技術面＋法人＋K線</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Footer ──
     st.markdown(f"""
@@ -8129,7 +8233,10 @@ if st.session_state.current_page == "分析中心":
 
         opm1, opm2 = st.columns(2)
         with opm1:
-            auto_pick_mode = st.selectbox("自動挑股模式", ["做多模式", "做空模式"], index=0)
+            _landing_mode = st.session_state.pop("_landing_auto_mode", None)
+            _mode_options = ["做多模式", "做空模式"]
+            _mode_default = _mode_options.index(_landing_mode) if _landing_mode in _mode_options else 0
+            auto_pick_mode = st.selectbox("自動挑股模式", _mode_options, index=_mode_default)
         with opm2:
             candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
         st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分；做空模式：總分≥60，同架構反向評分，篩選實戰可操作標的")
