@@ -245,117 +245,193 @@ def inject_responsive_css():
     }
     .lp-hero {
         text-align: center;
-        padding: 3.5rem 1.2rem 2.5rem;
-        background: linear-gradient(180deg, rgba(59,130,246,0.12) 0%, rgba(15,23,42,0) 100%);
-        border-radius: 24px;
-        margin-bottom: 2rem;
+        padding: 3.8rem 1.2rem 2.2rem;
+        background: radial-gradient(ellipse at 50% 0%, rgba(59,130,246,0.18) 0%, rgba(139,92,246,0.08) 40%, rgba(15,23,42,0) 70%);
+        border-radius: 28px;
+        margin-bottom: 1rem;
+        position: relative;
+        overflow: hidden;
+    }
+    .lp-hero::before {
+        content: "";
+        position: absolute;
+        top: -1px; left: -1px; right: -1px; bottom: -1px;
+        border-radius: 28px;
+        background: linear-gradient(135deg, rgba(96,165,250,0.25), rgba(139,92,246,0.15), rgba(244,114,182,0.1), transparent 60%);
+        z-index: 0;
+        pointer-events: none;
+        mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        mask-composite: exclude;
+        -webkit-mask-composite: xor;
+        padding: 1px;
     }
     .lp-hero h1 {
-        font-size: 2.2rem !important;
+        font-size: 2.4rem !important;
         font-weight: 900;
-        background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #f472b6 100%);
+        background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 40%, #f472b6 80%, #fb923c 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin-bottom: 0.6rem;
-        line-height: 1.2;
+        margin-bottom: 0.5rem;
+        line-height: 1.15;
+        position: relative;
+        z-index: 1;
     }
     .lp-hero .lp-sub {
-        font-size: 1.1rem;
-        color: #94a3b8;
-        margin-bottom: 0.3rem;
+        font-size: 1.05rem;
+        color: #cbd5e1;
+        margin-bottom: 0.6rem;
+        font-weight: 500;
+        position: relative; z-index: 1;
     }
-    .lp-hero .lp-desc {
-        font-size: 0.9rem;
-        color: #64748b;
-        margin-bottom: 1.8rem;
+    .lp-hero .lp-tags {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.4rem;
+        margin-bottom: 1.6rem;
+        position: relative; z-index: 1;
+    }
+    .lp-tag {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(148,163,184,0.18);
+        border-radius: 999px;
+        padding: 0.28rem 0.75rem;
+        font-size: 0.75rem;
+        color: #94a3b8;
+        letter-spacing: 0.02em;
+    }
+    .lp-section {
+        margin-bottom: 2.5rem;
     }
     .lp-section-title {
-        font-size: 1.15rem;
+        font-size: 1.1rem;
         font-weight: 800;
         color: #e2e8f0;
-        margin-bottom: 0.8rem;
-        padding-left: 0.2rem;
+        margin-bottom: 1rem;
+        padding-left: 0.15rem;
+        letter-spacing: 0.02em;
     }
     .lp-card {
-        border: 1px solid rgba(148,163,184,0.14);
-        background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
-        border-radius: 18px;
-        padding: 1.4rem 1.2rem;
-        margin-bottom: 0.8rem;
-        transition: border-color 0.2s;
+        border: 1px solid rgba(148,163,184,0.12);
+        background: linear-gradient(160deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.01) 100%);
+        border-radius: 20px;
+        padding: 1.5rem 1.3rem;
+        margin-bottom: 0.75rem;
+        transition: all 0.25s ease;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        position: relative;
+        overflow: hidden;
     }
+    .lp-card::after {
+        content: "";
+        position: absolute;
+        top: 0; left: 0;
+        width: 4px; height: 100%;
+        border-radius: 20px 0 0 20px;
+    }
+    .lp-card:nth-child(1)::after { background: linear-gradient(180deg, #3b82f6, #60a5fa); }
+    .lp-card:nth-child(2)::after { background: linear-gradient(180deg, #8b5cf6, #a78bfa); }
+    .lp-card:nth-child(3)::after { background: linear-gradient(180deg, #f59e0b, #fbbf24); }
+    .lp-card:nth-child(4)::after { background: linear-gradient(180deg, #10b981, #34d399); }
     .lp-card:hover {
-        border-color: rgba(96,165,250,0.4);
+        border-color: rgba(96,165,250,0.35);
+        box-shadow: 0 4px 24px rgba(59,130,246,0.12);
+        transform: translateY(-1px);
     }
-    .lp-card-icon {
-        font-size: 1.8rem;
-        margin-bottom: 0.5rem;
+    .lp-card-icon { font-size: 1.6rem; margin-bottom: 0.55rem; }
+    .lp-card-title { font-size: 1.02rem; font-weight: 700; color: #f1f5f9; margin-bottom: 0.35rem; }
+    .lp-card-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.55; }
+    .lp-strategy-panel {
+        border: 1px solid rgba(148,163,184,0.12);
+        background: linear-gradient(160deg, rgba(15,23,42,0.9) 0%, rgba(30,41,59,0.7) 100%);
+        border-radius: 22px;
+        padding: 1.6rem 1.3rem;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
     }
-    .lp-card-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: #f1f5f9;
-        margin-bottom: 0.3rem;
+    .lp-strategy-header {
+        font-size: 0.78rem;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 1rem;
+        font-weight: 600;
     }
-    .lp-card-desc {
+    .lp-strategy-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.7rem 0;
+        border-bottom: 1px solid rgba(148,163,184,0.08);
+    }
+    .lp-strategy-row:last-child { border-bottom: none; }
+    .lp-strategy-label { font-size: 0.88rem; color: #94a3b8; }
+    .lp-strategy-value { font-size: 1.05rem; font-weight: 700; color: #f1f5f9; }
+    .lp-score-bar {
+        height: 6px;
+        background: rgba(255,255,255,0.06);
+        border-radius: 3px;
+        margin-top: 0.5rem;
+        overflow: hidden;
+        position: relative;
+    }
+    .lp-score-fill {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.6s ease;
+    }
+    .lp-insight {
+        margin-top: 1rem;
+        padding: 0.9rem 1rem;
+        background: rgba(59,130,246,0.08);
+        border-left: 3px solid #3b82f6;
+        border-radius: 0 12px 12px 0;
         font-size: 0.85rem;
-        color: #94a3b8;
+        color: #cbd5e1;
         line-height: 1.5;
     }
     .lp-stat-card {
-        border: 1px solid rgba(148,163,184,0.14);
-        background: rgba(255,255,255,0.025);
-        border-radius: 16px;
-        padding: 1.1rem 1rem;
+        border: 1px solid rgba(148,163,184,0.12);
+        background: linear-gradient(160deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.01) 100%);
+        border-radius: 18px;
+        padding: 1.3rem 1rem;
         text-align: center;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.12);
     }
-    .lp-stat-value {
-        font-size: 1.6rem;
-        font-weight: 800;
-        color: #f8fafc;
-    }
-    .lp-stat-label {
-        font-size: 0.78rem;
-        color: #64748b;
-        margin-top: 0.2rem;
-    }
+    .lp-stat-value { font-size: 1.7rem; font-weight: 800; color: #f8fafc; }
+    .lp-stat-label { font-size: 0.76rem; color: #64748b; margin-top: 0.25rem; letter-spacing: 0.04em; }
     .lp-step {
         display: flex;
         align-items: flex-start;
         gap: 1rem;
-        margin-bottom: 1.2rem;
+        margin-bottom: 1.3rem;
     }
     .lp-step-num {
-        width: 36px;
-        height: 36px;
+        width: 38px; height: 38px;
         border-radius: 50%;
         background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 800;
-        font-size: 1rem;
-        color: white;
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 800; font-size: 0.95rem; color: white;
         flex-shrink: 0;
+        box-shadow: 0 2px 10px rgba(59,130,246,0.3);
     }
-    .lp-step-text h4 {
-        margin: 0 0 0.2rem 0;
-        font-size: 0.98rem;
-        color: #e2e8f0;
-    }
-    .lp-step-text p {
-        margin: 0;
-        font-size: 0.84rem;
-        color: #94a3b8;
-    }
+    .lp-step-text h4 { margin: 0.1rem 0 0.25rem 0; font-size: 0.98rem; color: #e2e8f0; }
+    .lp-step-text p { margin: 0; font-size: 0.82rem; color: #94a3b8; line-height: 1.5; }
     .lp-divider {
         height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(148,163,184,0.2), transparent);
-        margin: 2rem 0;
+        background: linear-gradient(90deg, transparent, rgba(148,163,184,0.18), transparent);
+        margin: 2.2rem 0;
+    }
+    .lp-footer {
+        text-align: center;
+        padding: 1.5rem 0 2.5rem;
+        color: #475569;
+        font-size: 0.78rem;
+        letter-spacing: 0.02em;
     }
     @media (max-width: 900px) {
-        .lp-hero { padding: 2.5rem 0.8rem 2rem; }
-        .lp-hero h1 { font-size: 1.75rem !important; }
+        .lp-hero { padding: 2.8rem 0.8rem 1.8rem; }
+        .lp-hero h1 { font-size: 1.85rem !important; }
+        .lp-strategy-panel { padding: 1.2rem 1rem; }
     }
     .rank-chip {
         display: inline-block;
@@ -4997,17 +5073,23 @@ inject_responsive_css()
 
 
 def render_landing_page():
+    # ── Hero ──
     st.markdown("""
     <div class="lp-hero">
         <h1>台股短線系統</h1>
-        <div class="lp-sub">AI 驅動的台股短線交易分析平台</div>
-        <div class="lp-desc">做多 / 做空雙模式自動挑股　｜　100 分制綜合評分　｜　即時法人籌碼</div>
+        <div class="lp-sub">短線交易決策分析平台</div>
+        <div class="lp-tags">
+            <span class="lp-tag">做多 / 做空雙模式</span>
+            <span class="lp-tag">100 分評級</span>
+            <span class="lp-tag">法人動態</span>
+            <span class="lp-tag">快照驗證</span>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("📈  開始分析", use_container_width=True, type="primary"):
+        if st.button("🚀  開始分析", use_container_width=True, type="primary"):
             st.session_state.current_page = "分析中心"
             st.rerun()
     with c2:
@@ -5015,14 +5097,71 @@ def render_landing_page():
             st.session_state.current_page = "市場儀表板"
             st.rerun()
 
+    # ── 今日策略總覽 ──
+    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">📡 今日策略總覽</div>', unsafe_allow_html=True)
+
+    try:
+        mi = market_filter()
+        mkt_close = mi.get("close", 0)
+        mkt_label = mi.get("label", "--")
+        mkt_adj = mi.get("score_adj", 0)
+
+        is_bull = "多" in mkt_label
+        is_bear = "空" in mkt_label
+        direction_color = "#4ade80" if is_bull else "#f87171" if is_bear else "#fbbf24"
+        direction_text = mkt_label
+        strategy_text = "做多優先" if is_bull else "做空優先" if is_bear else "觀望為主"
+        long_advantage = max(0, min(100, 50 + mkt_adj * 3 + (15 if is_bull else -10 if is_bear else 0)))
+        short_advantage = max(0, min(100, 50 - mkt_adj * 3 + (15 if is_bear else -10 if is_bull else 0)))
+
+        if is_bull:
+            insight = "今日多方條件較完整，可優先觀察做多候選股。量能與趨勢若同步配合，短線勝率較高。"
+        elif is_bear:
+            insight = "今日空方結構較明確，建議觀察做空機會或降低持倉。避免逆勢追多。"
+        else:
+            insight = "今日多空力道拉鋸，建議等待方向明確再操作，或以小部位試單為主。"
+
+        st.markdown(f"""
+        <div class="lp-strategy-panel">
+            <div class="lp-strategy-header">MARKET STRATEGY OVERVIEW</div>
+            <div class="lp-strategy-row">
+                <span class="lp-strategy-label">加權指數</span>
+                <span class="lp-strategy-value">{mkt_close:,.0f}</span>
+            </div>
+            <div class="lp-strategy-row">
+                <span class="lp-strategy-label">今日市場偏向</span>
+                <span class="lp-strategy-value" style="color:{direction_color};">{direction_text}</span>
+            </div>
+            <div class="lp-strategy-row">
+                <span class="lp-strategy-label">優先策略</span>
+                <span class="lp-strategy-value">{strategy_text}</span>
+            </div>
+            <div class="lp-strategy-row">
+                <span class="lp-strategy-label">做多優勢分數</span>
+                <span class="lp-strategy-value" style="color:#4ade80;">{long_advantage}</span>
+            </div>
+            <div class="lp-score-bar"><div class="lp-score-fill" style="width:{long_advantage}%;background:linear-gradient(90deg,#22c55e,#4ade80);"></div></div>
+            <div class="lp-strategy-row" style="margin-top:0.3rem;">
+                <span class="lp-strategy-label">做空優勢分數</span>
+                <span class="lp-strategy-value" style="color:#f87171;">{short_advantage}</span>
+            </div>
+            <div class="lp-score-bar"><div class="lp-score-fill" style="width:{short_advantage}%;background:linear-gradient(90deg,#ef4444,#f87171);"></div></div>
+            <div class="lp-insight">{insight}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    except Exception:
+        st.info("大盤資料載入中...")
+
+    # ── 核心功能 ──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="lp-section-title">🧩 核心功能</div>', unsafe_allow_html=True)
 
     features = [
-        ("🎯", "自動挑股", "做多 / 做空雙模式，趨勢＋動能＋量價＋籌碼＋風險五維評分，60 分以上入選"),
-        ("🔍", "單股分析", "輸入股票代碼即時分析，完整技術面＋法人籌碼＋進出場策略"),
-        ("📸", "快照中心", "盤前建立快照，盤後對照比較，追蹤分析準確度"),
-        ("💼", "持倉中心", "即時持倉追蹤、損益計算、當沖優先判讀"),
+        ("🎯", "自動挑股", "做多 / 做空雙模式，趨勢＋動能＋量價＋籌碼＋風險五維評分，≥ 60 分入選"),
+        ("🔍", "單股分析", "輸入代碼即時運算，完整技術面＋法人籌碼＋進出場策略＋K線圖"),
+        ("📸", "快照中心", "盤前建立快照，盤後自動對照，追蹤每次分析的準確度"),
+        ("💼", "持倉中心", "即時持倉追蹤、損益計算、當沖優先判讀、風控預警"),
     ]
     for icon, title, desc in features:
         st.markdown(f"""
@@ -5033,33 +5172,9 @@ def render_landing_page():
         </div>
         """, unsafe_allow_html=True)
 
+    # ── 快速入口 ──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">📡 今日大盤</div>', unsafe_allow_html=True)
-
-    try:
-        mi = market_filter()
-        s1, s2 = st.columns(2)
-        with s1:
-            st.markdown(f"""
-            <div class="lp-stat-card">
-                <div class="lp-stat-value">{mi['close']:.0f}</div>
-                <div class="lp-stat-label">加權指數</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with s2:
-            color = "#4ade80" if "多" in mi.get("label", "") else "#f87171" if "空" in mi.get("label", "") else "#fbbf24"
-            st.markdown(f"""
-            <div class="lp-stat-card">
-                <div class="lp-stat-value" style="color:{color};">{mi.get('label', '--')}</div>
-                <div class="lp-stat-label">大盤濾網</div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.caption(mi.get("text", ""))
-    except Exception:
-        st.info("大盤資料載入中...")
-
-    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">🚀 快速入口</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">⚡ 快速入口</div>', unsafe_allow_html=True)
 
     q1, q2 = st.columns(2)
     with q1:
@@ -5080,14 +5195,15 @@ def render_landing_page():
             st.session_state.current_page = "持倉中心"
             st.rerun()
 
+    # ── 使用流程 ──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">⚡ 使用流程</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">🔄 操作流程</div>', unsafe_allow_html=True)
 
     steps = [
-        ("1", "選擇模式", "做多或做空，系統自動從 250 檔候選池篩選"),
-        ("2", "自動評分", "趨勢 / 動能 / 量價 / 籌碼 / 風險 五維度 100 分制"),
-        ("3", "查看結果", "總分排序，每檔附帶入選原因、風險警示、進出場策略"),
-        ("4", "深入分析", "點進單股查看完整技術面、法人資料、K線圖"),
+        ("1", "選擇模式", "做多或做空，系統自動從 250 檔候選池開始篩選"),
+        ("2", "五維評分", "趨勢 / 動能 / 量價 / 籌碼 / 風險，總分 100 分制"),
+        ("3", "精選結果", "依總分排序，每檔附帶入選原因、風險警示、策略建議"),
+        ("4", "深入研究", "點進單股查看完整技術面、法人資料、K線圖表"),
     ]
     for num, title, desc in steps:
         st.markdown(f"""
@@ -5100,10 +5216,12 @@ def render_landing_page():
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
+    # ── Footer ──
     st.markdown(f"""
-    <div style="text-align:center;padding:1rem 0 2rem;color:#475569;font-size:0.8rem;">
-        台股短線系統 {APP_VERSION}　｜　資料來源：Yahoo Finance / TWSE / TPEx
+    <div class="lp-divider"></div>
+    <div class="lp-footer">
+        台股短線系統 {APP_VERSION}　｜　資料來源：Yahoo Finance / TWSE / TPEx<br>
+        <span style="font-size:0.72rem;">本系統僅供分析參考，不構成投資建議。投資有風險，請自行判斷。</span>
     </div>
     """, unsafe_allow_html=True)
 
