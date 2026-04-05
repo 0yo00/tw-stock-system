@@ -563,7 +563,39 @@ def inject_responsive_css():
         font-size: 0.78rem;
         letter-spacing: 0.02em;
     }
+    .mobile-bottom-nav {
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        z-index: 99999;
+        background: rgba(11,18,32,0.96);
+        backdrop-filter: blur(12px);
+        border-top: 1px solid rgba(148,163,184,0.12);
+        display: none;
+        padding: 0.35rem 0 max(0.35rem, env(safe-area-inset-bottom));
+    }
+    .mobile-bottom-nav-inner {
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        max-width: 500px;
+        margin: 0 auto;
+    }
+    .mobile-nav-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.15rem;
+        padding: 0.25rem 0.4rem;
+        border-radius: 10px;
+        min-width: 52px;
+    }
+    .mobile-nav-item .nav-icon { font-size: 1.15rem; line-height: 1; }
+    .mobile-nav-item .nav-label { font-size: 0.62rem; color: #64748b; font-weight: 500; }
+    .mobile-nav-item.active .nav-label { color: #60a5fa; font-weight: 700; }
+    .mobile-nav-item.active { background: rgba(96,165,250,0.1); }
     @media (max-width: 900px) {
+        .mobile-bottom-nav { display: block; }
+        .block-container { padding-bottom: 5rem !important; }
         .lp-hero { padding: 2.8rem 0.8rem 1.8rem; }
         .lp-hero h1 { font-size: 1.85rem !important; }
         .lp-strategy-panel { padding: 1.2rem 1rem; }
@@ -5175,6 +5207,15 @@ def load_cached_official_meta():
 
 
 
+NAV_ITEMS = [
+    {"key": "首頁", "icon": "🏠", "label": "首頁"},
+    {"key": "分析中心", "icon": "📈", "label": "分析"},
+    {"key": "市場儀表板", "icon": "📊", "label": "市場"},
+    {"key": "快照中心", "icon": "📸", "label": "快照"},
+    {"key": "持倉中心", "icon": "💼", "label": "持倉"},
+]
+NAV_KEYS = [n["key"] for n in NAV_ITEMS]
+
 ensure_names_file()
 name_map = load_name_map()
 if "favorites" not in st.session_state:
@@ -5435,12 +5476,14 @@ def render_global_banner():
 
 with st.sidebar:
     st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION}</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">AI 驅動短線交易分析平台</div></div>', unsafe_allow_html=True)
-    page_list = ["首頁", "分析中心", "市場儀表板", "快照中心", "持倉中心"]
-    if st.session_state.current_page not in page_list:
-        st.session_state.current_page = "分析中心"
-    page_choice = st.radio("功能區", page_list, index=page_list.index(st.session_state.current_page), label_visibility="collapsed")
-    if page_choice != st.session_state.current_page:
-        st.session_state.current_page = page_choice
+    if st.session_state.current_page not in NAV_KEYS:
+        st.session_state.current_page = "首頁"
+    _sidebar_labels = [f"{n['icon']} {n['key']}" for n in NAV_ITEMS]
+    _sidebar_idx = NAV_KEYS.index(st.session_state.current_page) if st.session_state.current_page in NAV_KEYS else 0
+    page_choice_label = st.radio("功能區", _sidebar_labels, index=_sidebar_idx, label_visibility="collapsed")
+    _page_key = page_choice_label.split(" ", 1)[1] if " " in page_choice_label else page_choice_label
+    if _page_key != st.session_state.current_page:
+        st.session_state.current_page = _page_key
         st.rerun()
 
     st.markdown('<div class="nav-card"><div class="nav-title">使用者設定</div></div>', unsafe_allow_html=True)
@@ -9682,5 +9725,25 @@ if st.session_state.current_page == "快照中心":
                             detail_row = compare_batch_view[compare_batch_view["股票"] == selected_detail_stock].iloc[0].to_dict()
                             render_batch_compare_detail(detail_row, key_prefix="v129")
 
+# ── 手機底部導航列 ──
+_bnav_current = st.session_state.current_page
+_bnav_items_html = "".join(
+    f'<div class="mobile-nav-item {"active" if n["key"] == _bnav_current else ""}">'
+    f'<span class="nav-icon">{n["icon"]}</span>'
+    f'<span class="nav-label">{n["label"]}</span></div>'
+    for n in NAV_ITEMS
+)
+st.markdown(f'<div class="mobile-bottom-nav"><div class="mobile-bottom-nav-inner">{_bnav_items_html}</div></div>', unsafe_allow_html=True)
 
+_bnav_cols = st.columns(len(NAV_ITEMS))
+for _bi, _bn in enumerate(NAV_ITEMS):
+    with _bnav_cols[_bi]:
+        if st.button(_bn["icon"], key=f"_bnav_{_bn['key']}"):
+            st.session_state.current_page = _bn["key"]
+            st.rerun()
+
+st.markdown("""<style>
+@media (min-width:901px){div[data-testid="stHorizontalBlock"]:last-of-type{display:none!important}}
+@media (max-width:900px){div[data-testid="stHorizontalBlock"]:last-of-type{position:fixed;bottom:0;left:0;right:0;z-index:99998;opacity:0;height:56px;pointer-events:auto}div[data-testid="stHorizontalBlock"]:last-of-type button{opacity:0!important;height:56px!important}}
+</style>""", unsafe_allow_html=True)
 
