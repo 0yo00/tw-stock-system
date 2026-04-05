@@ -343,51 +343,111 @@ def inject_responsive_css():
     .lp-card-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.55; }
     .lp-strategy-panel {
         border: 1px solid rgba(148,163,184,0.12);
-        background: linear-gradient(160deg, rgba(15,23,42,0.9) 0%, rgba(30,41,59,0.7) 100%);
+        background: linear-gradient(160deg, rgba(15,23,42,0.92) 0%, rgba(30,41,59,0.72) 100%);
         border-radius: 22px;
-        padding: 1.6rem 1.3rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        padding: 1.5rem 1.2rem 1.2rem;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.22);
     }
     .lp-strategy-header {
-        font-size: 0.78rem;
+        font-size: 0.72rem;
         color: #64748b;
         text-transform: uppercase;
-        letter-spacing: 0.1em;
-        margin-bottom: 1rem;
+        letter-spacing: 0.12em;
+        margin-bottom: 0.2rem;
         font-weight: 600;
     }
     .lp-strategy-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 0.7rem 0;
-        border-bottom: 1px solid rgba(148,163,184,0.08);
+        padding: 0.85rem 0.6rem;
+        border-bottom: 1px solid rgba(148,163,184,0.07);
+        border-radius: 10px;
+        margin: 0 -0.3rem;
+        transition: background 0.15s;
     }
-    .lp-strategy-row:last-child { border-bottom: none; }
-    .lp-strategy-label { font-size: 0.88rem; color: #94a3b8; }
-    .lp-strategy-value { font-size: 1.05rem; font-weight: 700; color: #f1f5f9; }
-    .lp-score-bar {
-        height: 6px;
+    .lp-strategy-row:hover { background: rgba(255,255,255,0.02); }
+    .lp-strategy-label {
+        font-size: 0.92rem;
+        color: #cbd5e1;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .lp-strategy-label .lp-dot {
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: #475569;
+        flex-shrink: 0;
+    }
+    .lp-strategy-value {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #f1f5f9;
+        letter-spacing: -0.01em;
+    }
+    .lp-score-cards {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.7rem;
+        margin-top: 0.6rem;
+    }
+    .lp-score-card {
+        border: 1px solid rgba(148,163,184,0.1);
+        border-radius: 16px;
+        padding: 1.1rem 0.9rem 0.9rem;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+    }
+    .lp-score-card::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+    }
+    .lp-score-card.long { background: rgba(34,197,94,0.06); }
+    .lp-score-card.long::before { background: linear-gradient(90deg, #22c55e, #4ade80); }
+    .lp-score-card.short { background: rgba(239,68,68,0.06); }
+    .lp-score-card.short::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+    .lp-score-card-label {
+        font-size: 0.76rem;
+        color: #94a3b8;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        margin-bottom: 0.4rem;
+    }
+    .lp-score-card-value {
+        font-size: 2rem;
+        font-weight: 800;
+        line-height: 1.1;
+        margin-bottom: 0.5rem;
+    }
+    .lp-score-card.long .lp-score-card-value { color: #4ade80; }
+    .lp-score-card.short .lp-score-card-value { color: #f87171; }
+    .lp-score-mini-bar {
+        height: 5px;
         background: rgba(255,255,255,0.06);
         border-radius: 3px;
-        margin-top: 0.5rem;
         overflow: hidden;
-        position: relative;
     }
-    .lp-score-fill {
+    .lp-score-mini-fill {
         height: 100%;
         border-radius: 3px;
         transition: width 0.6s ease;
     }
+    .lp-score-card.long .lp-score-mini-fill { background: linear-gradient(90deg, #22c55e, #4ade80); }
+    .lp-score-card.short .lp-score-mini-fill { background: linear-gradient(90deg, #ef4444, #f87171); }
     .lp-insight {
-        margin-top: 1rem;
-        padding: 0.9rem 1rem;
-        background: rgba(59,130,246,0.08);
+        margin-top: 0.9rem;
+        padding: 0.85rem 1rem;
+        background: rgba(59,130,246,0.07);
         border-left: 3px solid #3b82f6;
-        border-radius: 0 12px 12px 0;
-        font-size: 0.85rem;
+        border-radius: 0 14px 14px 0;
+        font-size: 0.84rem;
         color: #cbd5e1;
-        line-height: 1.5;
+        line-height: 1.55;
     }
     .lp-stat-card {
         border: 1px solid rgba(148,163,184,0.12);
@@ -5126,27 +5186,29 @@ def render_landing_page():
         <div class="lp-strategy-panel">
             <div class="lp-strategy-header">MARKET STRATEGY OVERVIEW</div>
             <div class="lp-strategy-row">
-                <span class="lp-strategy-label">加權指數</span>
+                <span class="lp-strategy-label"><span class="lp-dot"></span>加權指數</span>
                 <span class="lp-strategy-value">{mkt_close:,.0f}</span>
             </div>
             <div class="lp-strategy-row">
-                <span class="lp-strategy-label">今日市場偏向</span>
+                <span class="lp-strategy-label"><span class="lp-dot" style="background:{direction_color};"></span>今日市場偏向</span>
                 <span class="lp-strategy-value" style="color:{direction_color};">{direction_text}</span>
             </div>
-            <div class="lp-strategy-row">
-                <span class="lp-strategy-label">優先策略</span>
+            <div class="lp-strategy-row" style="border-bottom:none;">
+                <span class="lp-strategy-label"><span class="lp-dot" style="background:#a78bfa;"></span>優先策略</span>
                 <span class="lp-strategy-value">{strategy_text}</span>
             </div>
-            <div class="lp-strategy-row">
-                <span class="lp-strategy-label">做多優勢分數</span>
-                <span class="lp-strategy-value" style="color:#4ade80;">{long_advantage}</span>
+            <div class="lp-score-cards">
+                <div class="lp-score-card long">
+                    <div class="lp-score-card-label">做多優勢</div>
+                    <div class="lp-score-card-value">{long_advantage}</div>
+                    <div class="lp-score-mini-bar"><div class="lp-score-mini-fill" style="width:{long_advantage}%;"></div></div>
+                </div>
+                <div class="lp-score-card short">
+                    <div class="lp-score-card-label">做空優勢</div>
+                    <div class="lp-score-card-value">{short_advantage}</div>
+                    <div class="lp-score-mini-bar"><div class="lp-score-mini-fill" style="width:{short_advantage}%;"></div></div>
+                </div>
             </div>
-            <div class="lp-score-bar"><div class="lp-score-fill" style="width:{long_advantage}%;background:linear-gradient(90deg,#22c55e,#4ade80);"></div></div>
-            <div class="lp-strategy-row" style="margin-top:0.3rem;">
-                <span class="lp-strategy-label">做空優勢分數</span>
-                <span class="lp-strategy-value" style="color:#f87171;">{short_advantage}</span>
-            </div>
-            <div class="lp-score-bar"><div class="lp-score-fill" style="width:{short_advantage}%;background:linear-gradient(90deg,#ef4444,#f87171);"></div></div>
             <div class="lp-insight">{insight}</div>
         </div>
         """, unsafe_allow_html=True)
