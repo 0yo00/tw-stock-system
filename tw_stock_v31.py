@@ -2149,13 +2149,13 @@ def fetch_institutional_bundle_all():
     _inst_deadline = _inst_time.time() + 15
     source_groups = [
         ('TWSE', [
-            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(1)),
-            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(1)),
+            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(5)),
+            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(5)),
             ('TWSE_OPENAPI_TWT38U_ALL', lambda: _fetch_twse_openapi_rows_v137('fund/TWT38U_ALL')),
         ]),
         ('TPEx', [
-            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(1)),
-            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(1)),
+            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(5)),
+            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(5)),
         ]),
     ]
     debug_rows = []
