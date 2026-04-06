@@ -188,7 +188,7 @@ def build_short_strategy(row: dict):
         close = _safe_float(row.get("收盤", 0))
         support = _safe_float(row.get("支撐", 0))
         resistance = _safe_float(row.get("短期壓力", 0))
-        breakout = _safe_float(row.get("突破目標", 0))
+        atr = _safe_float(row.get("ATR", 0))
     except Exception:
         return {
             "空方短期壓力": "",
@@ -201,17 +201,12 @@ def build_short_strategy(row: dict):
 
     short_resistance = resistance if resistance > 0 else close
     short_support = support if support > 0 else close
+    if atr <= 0:
+        atr = close * 0.02
 
-    if str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空":
-        if short_resistance > 0 and close > 0 and abs(short_resistance - close) / max(close, 1) <= 0.03:
-            short_entry = close
-        else:
-            short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
-    else:
-        short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+    short_entry = round(min(close, (close + short_resistance) / 2), 2) if short_resistance > close > 0 else round(close, 2)
 
-    short_stop = max(short_resistance * 1.02, breakout if breakout > 0 else 0)
-    short_stop = round(short_stop, 2) if short_stop > 0 else ""
+    short_stop = round(short_resistance + atr * 0.3, 2) if short_resistance > 0 else round(close * 1.03, 2)
 
     if short_resistance > 0 and short_support > 0:
         width = short_resistance - short_support
