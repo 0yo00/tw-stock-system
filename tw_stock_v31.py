@@ -2149,13 +2149,13 @@ def fetch_institutional_bundle_all():
     _inst_deadline = _inst_time.time() + 15
     source_groups = [
         ('TWSE', [
-            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(1)),
-            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(1)),
+            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(5)),
+            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(5)),
             ('TWSE_OPENAPI_TWT38U_ALL', lambda: _fetch_twse_openapi_rows_v137('fund/TWT38U_ALL')),
         ]),
         ('TPEx', [
-            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(1)),
-            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(1)),
+            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(5)),
+            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(5)),
         ]),
     ]
     debug_rows = []
@@ -7942,16 +7942,22 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 row["法人共振"] = row.get("法人共振", "未載入") or "未載入"
                 row["法人摘要"] = "法人資料未載入；需要時再手動開啟。"
             st.markdown("#### 核心摘要")
+            def _fmt_row(key):
+                v = row.get(key)
+                try:
+                    return f"{float(v):.2f}" if v is not None and v != "" else "--"
+                except (ValueError, TypeError):
+                    return str(v) if v else "--"
             core_top = [
-                ("收盤", f'{row["收盤"]:.2f}'),
-                ("進場", f'{row["進場"]:.2f}'),
-                ("停損", f'{row["停損"]:.2f}'),
-                ("短期壓力", f'{row["短期壓力"]:.2f}'),
-                ("中繼目標", f'{row["中繼目標"]:.2f}'),
-                ("突破目標", f'{row["突破目標"]:.2f}'),
-                ("風報比", f'{row["風報比"]:.2f}'),
-                ("結論", row["結論"]),
-                ("交易訊號", row["交易訊號"]),
+                ("收盤", _fmt_row("收盤")),
+                ("進場", _fmt_row("進場")),
+                ("停損", _fmt_row("停損")),
+                ("短期壓力", _fmt_row("短期壓力")),
+                ("中繼目標", _fmt_row("中繼目標")),
+                ("突破目標", _fmt_row("突破目標")),
+                ("風報比", _fmt_row("風報比")),
+                ("結論", str(row.get("結論", "--"))),
+                ("交易訊號", str(row.get("交易訊號", "--"))),
             ]
             top_cols = st.columns(2 if st.session_state.mobile_mode else 3)
             step = 2 if st.session_state.mobile_mode else 3
@@ -8077,12 +8083,12 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
 
             with st.expander("做多策略", expanded=False):
                 long_pairs = [
-                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
-                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
-                    ("多方建議進場", f'{row["進場"]:.2f}'),
-                    ("多方停損", f'{row["停損"]:.2f}'),
-                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
-                    ("多方突破目標", f'{row["突破目標"]:.2f}')
+                    ("多方短期支撐", _fmt_row("支撐")),
+                    ("多方短期壓力", _fmt_row("短期壓力")),
+                    ("多方建議進場", _fmt_row("進場")),
+                    ("多方停損", _fmt_row("停損")),
+                    ("多方中繼目標", _fmt_row("中繼目標")),
+                    ("多方突破目標", _fmt_row("突破目標")),
                 ]
                 long_cols_per_row = 2 if st.session_state.mobile_mode else 3
                 for i in range(0, len(long_pairs), long_cols_per_row):
