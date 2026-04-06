@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 import requests
 import urllib3
 from urllib.error import URLError, HTTPError
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import warnings
 import logging
 
@@ -29,9 +29,12 @@ except Exception:
     pass
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-APP_VERSION = "V178"
+APP_VERSION = "V180"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "自動挑股改為做多/做空雙模式，修正收盤價抓取問題。"
+APP_VERSION_NOTE = "綜合評分與策略區以 selected_side 同步；自動挑股預設對齊做多/做空模式。"
+
+# yfinance 單次下載逾時（秒）；逾時會拋錯以避免 Streamlit 快取空結果，並讓 resolve 可改試 .TWO
+_YF_DOWNLOAD_TIMEOUT_SEC = 36.0
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
@@ -1280,11 +1283,11 @@ def _patch_today_nan_row(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
             return df
     except Exception:
         return df
-    try:
+
+    def _intraday_patch():
         ticker = yf.Ticker(symbol.strip())
         fi = ticker.fast_info
         price = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
-        prev = getattr(fi, "previous_close", None) or getattr(fi, "previousClose", None)
         if price is None or not isinstance(price, (int, float)) or price <= 0:
             return df
         intra = ticker.history(period="1d", interval="1m")
@@ -1300,45 +1303,86 @@ def _patch_today_nan_row(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
             today_low = price
             today_close = price
             today_vol = 0
-        df.loc[df.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+        out = df.copy()
+        out.loc[out.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
             today_open, today_high, today_low, today_close, today_vol
         ]
-    except Exception:
-        pass
-    return df
+        return out
 
-@st.cache_data(ttl=600, show_spinner=False)
-def download_symbol(symbol: str) -> pd.DataFrame:
-    df = yf.download(symbol.strip(), period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_intraday_patch)
+            return fut.result(timeout=14.0)
+    except Exception:
+        return df
+
+
+def _download_symbol_pipeline(symbol: str) -> pd.DataFrame:
+    sym = symbol.strip()
+    df = yf.download(sym, period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
     if df is not None and not df.empty:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        df = _patch_today_nan_row(symbol, df)
+        df = _patch_today_nan_row(sym, df)
     df = normalize_df(df)
-    return _apply_official_latest_bar(symbol, df)
+    return _apply_official_latest_bar(sym, df)
 
 
-def resolve_symbol(raw_input: str):
+@st.cache_data(ttl=600, show_spinner=False)
+def download_symbol(symbol: str) -> pd.DataFrame:
+    sym = symbol.strip()
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_download_symbol_pipeline, sym)
+        try:
+            return fut.result(timeout=_YF_DOWNLOAD_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            raise TimeoutError(f"yfinance 逾時（>{_YF_DOWNLOAD_TIMEOUT_SEC:.0f}s）：{sym}")
+
+
+def resolve_symbol(raw_input: str, name_map: dict | None = None):
     raw = raw_input.strip().upper()
     if not raw:
         return None, pd.DataFrame()
+    nm_keys = {str(k).strip().upper() for k in (name_map or {}) if str(k).strip()}
     if raw.endswith(".TW") or raw.endswith(".TWO"):
         candidates = [raw]
     elif raw.isdigit() and len(raw) == 4:
-        candidates = [f"{raw}.TW", f"{raw}.TWO"]
+        tw_s = f"{raw}.TW"
+        two_s = f"{raw}.TWO"
+        in_tw = tw_s in nm_keys
+        in_two = two_s in nm_keys
+        if in_tw and not in_two:
+            candidates = [tw_s]
+        elif in_two and not in_tw:
+            candidates = [two_s]
+        else:
+            candidates = [tw_s, two_s]
     else:
         candidates = [raw, f"{raw}.TW", f"{raw}.TWO"]
-    for symbol in candidates:
-        df = download_symbol(symbol)
-        if not df.empty and len(df) >= 20:
-            return symbol, df
-    return candidates[0], pd.DataFrame()
+    fallback = candidates[0]
+    for sym in candidates:
+        try:
+            df = download_symbol(sym)
+        except (TimeoutError, OSError, URLError, HTTPError, Exception):
+            df = pd.DataFrame()
+        if df is not None and not df.empty and len(df) >= 20:
+            return sym, df
+    return fallback, pd.DataFrame()
+
+
+def _download_twii_pipeline() -> pd.DataFrame:
+    df = yf.download("^TWII", period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    return normalize_df(df)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_market_data():
-    df = yf.download("^TWII", period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
-    return normalize_df(df)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_download_twii_pipeline)
+        try:
+            return fut.result(timeout=_YF_DOWNLOAD_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            return pd.DataFrame()
 
 TWSE_OPENAPI_BASE = "https://openapi.twse.com.tw/v1"
 
@@ -3860,17 +3904,18 @@ def analyze_one_cached(raw_stock: str, market_adj: int = 0, name_map: dict | Non
     return item
 
 
-def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None):
+def analyze_one(raw_stock: str, market_adj: int = 0, name_map: dict | None = None, indicator_df_store: dict | None = None):
     name_map = name_map or load_name_map()
     item = ce.analyze_one(
         raw_stock=raw_stock,
         market_adj=market_adj,
         name_map=name_map,
-        resolve_symbol=resolve_symbol,
+        resolve_symbol=lambda s: resolve_symbol(s, name_map),
         indicators=indicators,
         display_name_func=display_name,
         stock_sector=stock_sector,
         liquidity_builder=build_liquidity_profile,
+        indicator_df_store=indicator_df_store,
     )
     return item
 
@@ -3894,20 +3939,22 @@ def analyze_candidate_pool_cached(candidate_pool: tuple, market_adj: int, name_m
     return results
 
 
-def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_map: dict):
+def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_map: dict, progress_hook=None):
     codes = [str(x).strip() for x in candidate_pool if str(x).strip()]
+    empty_debug = {
+        "candidate_count": 0,
+        "cache_hits": 0,
+        "new_success": 0,
+        "new_failures": 0,
+        "cooldown_skips": 0,
+        "cooldown_rows": [],
+        "failure_rows": [],
+    }
     if not codes:
-        return [], {
-            "candidate_count": 0,
-            "cache_hits": 0,
-            "new_success": 0,
-            "new_failures": 0,
-            "cooldown_skips": 0,
-            "cooldown_rows": [],
-            "failure_rows": [],
-        }
+        return [], empty_debug, {}
 
     results = []
+    indicator_df_store: dict[str, pd.DataFrame] = {}
     debug = {
         "candidate_count": len(codes),
         "cache_hits": 0,
@@ -3941,14 +3988,28 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
             continue
         pending_codes.append(code_u)
 
+    if progress_hook:
+        progress_hook({
+            "phase": "queued",
+            "total_candidates": len(codes),
+            "cache_hits": debug["cache_hits"],
+            "cooldown_skips": debug["cooldown_skips"],
+            "pending_fetch": len(pending_codes),
+            "completed_fetch": debug["cache_hits"],
+            "failures": 0,
+            "batch_index": 0,
+            "batch_total": max(1, (len(pending_codes) + 19) // 20) if pending_codes else 0,
+        })
+
     if pending_codes:
         import time as _time_mod
         batch_size = 20
         max_workers = 4
-        for batch_start in range(0, len(pending_codes), batch_size):
+        num_batches = (len(pending_codes) + batch_size - 1) // batch_size
+        for batch_idx, batch_start in enumerate(range(0, len(pending_codes), batch_size)):
             batch = pending_codes[batch_start:batch_start + batch_size]
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(analyze_one, code, market_adj, name_map): code for code in batch}
+                futures = {executor.submit(analyze_one, code, market_adj, name_map, indicator_df_store): code for code in batch}
                 for fut in as_completed(futures):
                     code_u = futures[fut]
                     try:
@@ -3958,29 +4019,83 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
                         _candidate_register_failure(code_u, reason)
                         debug["new_failures"] += 1
                         debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        if progress_hook:
+                            progress_hook({
+                                "phase": "analyze",
+                                "total_candidates": len(codes),
+                                "cache_hits": debug["cache_hits"],
+                                "cooldown_skips": debug["cooldown_skips"],
+                                "pending_fetch": len(pending_codes),
+                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
+                                "failures": debug["new_failures"],
+                                "batch_index": batch_idx + 1,
+                                "batch_total": num_batches,
+                            })
                         continue
                     if item is None:
                         reason = "無有效日線或資料天數不足"
                         _candidate_register_failure(code_u, reason)
                         debug["new_failures"] += 1
                         debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        if progress_hook:
+                            progress_hook({
+                                "phase": "analyze",
+                                "total_candidates": len(codes),
+                                "cache_hits": debug["cache_hits"],
+                                "cooldown_skips": debug["cooldown_skips"],
+                                "pending_fetch": len(pending_codes),
+                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
+                                "failures": debug["new_failures"],
+                                "batch_index": batch_idx + 1,
+                                "batch_total": num_batches,
+                            })
                         continue
                     _candidate_stock_cache_set(code_u, market_adj, item)
                     results.append(item)
                     debug["new_success"] += 1
+                    if progress_hook:
+                        progress_hook({
+                            "phase": "analyze",
+                            "total_candidates": len(codes),
+                            "cache_hits": debug["cache_hits"],
+                            "cooldown_skips": debug["cooldown_skips"],
+                            "pending_fetch": len(pending_codes),
+                            "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
+                            "failures": debug["new_failures"],
+                            "batch_index": batch_idx + 1,
+                            "batch_total": num_batches,
+                        })
             if batch_start + batch_size < len(pending_codes):
                 _time_mod.sleep(0.5)
 
     debug["result_count"] = len(results)
-    return results, debug
+    debug["indicator_df_cached"] = len(indicator_df_store)
+    return results, debug, indicator_df_store
 
 
+def _indicator_df_for_auto_pick(item: dict, store: dict) -> pd.DataFrame | None:
+    if not store:
+        return None
+    code = str(item.get("_code") or item.get("股票代碼") or "").strip().upper()
+    if not code:
+        return None
+    df = store.get(code)
+    if df is not None and not df.empty:
+        return df
+    base = code.split(".")[0]
+    if re.fullmatch(r"\d{4}", base):
+        for suf in (".TW", ".TWO"):
+            d = store.get(base + suf)
+            if d is not None and not d.empty:
+                return d
+    return None
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_symbol_indicator_chart(symbol: str) -> pd.DataFrame:
     """單股詳細分析專用：只抓單一股票並補齊技術指標，避免切換股票時整頁重算。"""
-    resolved_code, raw_df = resolve_symbol(symbol)
+    nm = load_name_map()
+    resolved_code, raw_df = resolve_symbol(symbol, nm)
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
     try:
@@ -5189,6 +5304,10 @@ if "input_value" not in st.session_state:
     st.session_state.input_value = ""
 if "analysis_mode" not in st.session_state:
     st.session_state.analysis_mode = "idle"
+if "selected_side" not in st.session_state:
+    st.session_state.selected_side = "long"
+elif st.session_state.selected_side not in ("long", "short"):
+    st.session_state.selected_side = "long"
 if "preset_strategy" not in st.session_state:
     st.session_state.preset_strategy = "none"
 if "mobile_mode" not in st.session_state:
@@ -8014,6 +8133,14 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     st.json({k: ("--" if (isinstance(v, float) and pd.isna(v)) else v) for k, v in raw_inst_debug.items()})
 
             st.markdown("#### 綜合評分")
+            st.radio(
+                "評分面向",
+                options=["long", "short"],
+                format_func=lambda x: "📈 做多評分" if x == "long" else "📉 做空評分",
+                horizontal=True,
+                key="selected_side",
+                help="與下方策略區連動：選做多只看做多評分與做多策略，選做空只看做空評分與做空策略。",
+            )
             df_chart = get_symbol_indicator_chart(st.session_state.selected_code)
             row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
             long_metrics = long_pick_compute(df_chart, row_dict) if df_chart is not None and not df_chart.empty else None
@@ -8067,50 +8194,56 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 else:
                     st.caption(f'⚠️ {label}總分 {metrics[key_total]} < {threshold}，未達{label}門檻')
 
-            long_tab, short_tab = st.tabs(["📈 做多評分", "📉 做空評分"])
-            with long_tab:
+            _side = st.session_state.selected_side
+            if _side == "long":
                 if long_metrics is not None:
                     _render_score_panel("long", "做多", long_metrics)
                 else:
                     st.info("不符合做多必要條件（收盤需 > MA5 > MA10、MA5 ≥ MA10）")
-            with short_tab:
+            else:
                 if short_metrics is not None:
                     _render_score_panel("short", "做空", short_metrics)
                 else:
                     st.info("不符合做空必要條件（需跌破均線、弱勢結構）")
+
             st.markdown("#### 策略區")
-            st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
+            _hdr_l, _hdr_r = st.columns([3, 1])
+            with _hdr_l:
+                st.caption("位置與進出場欄位已整合到做多／做空策略；與上方「評分面向」同步，只顯示目前選擇的一側。")
+            with _hdr_r:
+                st.caption("目前顯示：**做多策略**" if _side == "long" else "目前顯示：**做空策略**")
 
-            with st.expander("做多策略", expanded=False):
-                long_pairs = [
-                    ("多方短期支撐", _fmt_row("支撐")),
-                    ("多方短期壓力", _fmt_row("短期壓力")),
-                    ("多方建議進場", _fmt_row("進場")),
-                    ("多方停損", _fmt_row("停損")),
-                    ("多方中繼目標", _fmt_row("中繼目標")),
-                    ("多方突破目標", _fmt_row("突破目標")),
-                ]
-                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(long_pairs), long_cols_per_row):
-                    cols = st.columns(long_cols_per_row)
-                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
-                        col.metric(label, value)
-
-            with st.expander("做空策略", expanded=False):
-                short_pairs = [
-                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
-                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
-                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
-                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
-                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
-                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
-                ]
-                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(short_pairs), short_cols_per_row):
-                    cols = st.columns(short_cols_per_row)
-                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
-                        col.metric(label, value)
-                st.caption("空方策略正式版：V178 已將空方短期壓力、建議進場、停損、中繼目標與跌破目標全部限制在次日可交易邊界內，避免再跑出偏波段的過寬數值。")
+            if _side == "long":
+                with st.expander("做多策略", expanded=True):
+                    long_pairs = [
+                        ("多方短期支撐", _fmt_row("支撐")),
+                        ("多方短期壓力", _fmt_row("短期壓力")),
+                        ("多方建議進場", _fmt_row("進場")),
+                        ("多方停損", _fmt_row("停損")),
+                        ("多方中繼目標", _fmt_row("中繼目標")),
+                        ("多方突破目標", _fmt_row("突破目標")),
+                    ]
+                    long_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                    for i in range(0, len(long_pairs), long_cols_per_row):
+                        cols = st.columns(long_cols_per_row)
+                        for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                            col.metric(label, value)
+            else:
+                with st.expander("做空策略", expanded=True):
+                    short_pairs = [
+                        ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
+                        ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
+                        ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
+                        ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
+                        ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
+                        ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+                    ]
+                    short_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                    for i in range(0, len(short_pairs), short_cols_per_row):
+                        cols = st.columns(short_cols_per_row)
+                        for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                            col.metric(label, value)
+                    st.caption("空方策略正式版：已將空方短期壓力、建議進場、停損、中繼目標與跌破目標限制在次日可交易邊界內，避免偏波段過寬數值。")
 
             render_reason_block(row, "本檔判斷理由")
 
@@ -8274,9 +8407,14 @@ if st.session_state.current_page == "分析中心":
             _mode_default = _mode_options.index(_landing_mode) if _landing_mode in _mode_options else 0
             auto_pick_mode = st.selectbox("自動挑股模式", _mode_options, index=_mode_default)
         with opm2:
-            candidate_pool_mode = st.selectbox("候選池來源", ["核心池（穩定優先）", "核心池＋擴充池（250檔）"], index=1)
+            candidate_pool_mode = st.selectbox(
+                "候選池來源",
+                ["核心池（穩定優先）", "擴充池（約250檔，本機較慢）"],
+                index=0,
+                help="擴充池會對大量股票逐一下載日線；本機網路慢時可能需數分鐘。建議日常先用核心池。",
+            )
         st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分；做空模式：總分≥60，同架構反向評分，篩選實戰可操作標的")
-        st.caption("V172：候選池來源改成靜態核心池/擴充池；分析中心不再自動官方補資料，單股詳細分析改成延後載入法人與圖表。")
+        st.caption("V179：預設核心池；擴充池為慢速模式；自動挑股重用首輪技術指標並對 yfinance 加逾時，避免本機整批卡住。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
         op3, op4 = st.columns(2)
@@ -8302,6 +8440,17 @@ if st.session_state.current_page == "分析中心":
 
     if auto_pick:
         try:
+            pick_progress = st.empty()
+            def _auto_pick_progress(info):
+                ph = info.get("phase", "")
+                pick_progress.markdown(
+                    f"**自動挑股進度** ｜ 總候選 **{info.get('total_candidates', 0)}** ｜ "
+                    f"已處理 **{info.get('completed_fetch', 0)}**（快取命中 {info.get('cache_hits', 0)}、冷卻跳過 {info.get('cooldown_skips', 0)}）｜ "
+                    f"失敗 **{info.get('failures', 0)}** ｜ 批次 **{info.get('batch_index', 0)}** / **{info.get('batch_total', 0)}**"
+                    + (f" ｜ *{ph}*" if ph else "")
+                )
+
+            indicator_df_store = {}
             with st.spinner("正在建立候選池並執行自動挑股，請稍候..."):
                 pool_layers = build_candidate_pool_layers(name_map, max_price=1100.0, expanded_target=250)
                 if candidate_pool_mode == "核心池（穩定優先）":
@@ -8309,7 +8458,9 @@ if st.session_state.current_page == "分析中心":
                     mode_label = f"核心池（穩定優先）｜{pool_layers.get('core_count', 0)} 檔"
                 else:
                     active_candidate_pool = pool_layers.get("full_pool", [])
-                    mode_label = f"核心池＋擴充池（250檔）｜核心 {pool_layers.get('core_count', 0)} 檔＋擴充 {pool_layers.get('expansion_count', 0)} 檔＝{pool_layers.get('full_count', 0)} 檔"
+                    mode_label = (
+                        f"擴充池（慢速）｜核心 {pool_layers.get('core_count', 0)} 檔＋擴充 {pool_layers.get('expansion_count', 0)} 檔＝{pool_layers.get('full_count', 0)} 檔"
+                    )
 
                 st.session_state.last_candidate_pool = active_candidate_pool
                 st.session_state.last_candidate_pool_layer_meta = {
@@ -8319,8 +8470,19 @@ if st.session_state.current_page == "分析中心":
                     "expansion_count": pool_layers.get("expansion_count", 0),
                     "full_count": pool_layers.get("full_count", 0),
                 }
-                raw_candidates, engine_debug = analyze_candidate_pool_session(tuple(active_candidate_pool), int(market_info["score_adj"]), name_map)
+                raw_candidates, engine_debug, indicator_df_store = analyze_candidate_pool_session(
+                    tuple(active_candidate_pool),
+                    int(market_info["score_adj"]),
+                    name_map,
+                    progress_hook=_auto_pick_progress,
+                )
                 st.session_state.last_candidate_engine_summary = engine_debug
+
+            pick_progress.markdown(
+                f"**自動挑股完成** ｜ 候選 **{engine_debug.get('candidate_count', 0)}** ｜ "
+                f"初評列管 **{engine_debug.get('result_count', 0)}** ｜ 本輪新成功 **{engine_debug.get('new_success', 0)}** ｜ "
+                f"失敗 **{engine_debug.get('new_failures', 0)}** ｜ 技術資料重用 **{engine_debug.get('indicator_df_cached', 0)}** 檔"
+            )
 
             liquidity_passed = [x for x in raw_candidates if liquidity_pass(x)]
             liquidity_filtered = [x for x in raw_candidates if not liquidity_pass(x)]
@@ -8378,15 +8540,18 @@ if st.session_state.current_page == "分析中心":
                 st.session_state.results_data = []
                 st.session_state.selected_code = None
                 st.session_state.analysis_mode = "auto"
+                st.session_state.selected_side = "short" if auto_pick_mode == "做空模式" else "long"
 
             elif auto_pick_mode == "做空模式":
                 candidates = []
                 for item in source_candidates:
                     code = item.get("_code", item.get("股票代碼", ""))
-                    try:
-                        df_chart = get_symbol_indicator_chart(code)
-                    except Exception:
-                        df_chart = None
+                    df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
+                    if df_chart is None or df_chart.empty:
+                        try:
+                            df_chart = get_symbol_indicator_chart(code)
+                        except Exception:
+                            df_chart = None
                     metrics = short_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
                     if metrics is None:
                         continue
@@ -8411,10 +8576,12 @@ if st.session_state.current_page == "分析中心":
                 candidates = []
                 for item in source_candidates:
                     code = item.get("_code", item.get("股票代碼", ""))
-                    try:
-                        df_chart = get_symbol_indicator_chart(code)
-                    except Exception:
-                        df_chart = None
+                    df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
+                    if df_chart is None or df_chart.empty:
+                        try:
+                            df_chart = get_symbol_indicator_chart(code)
+                        except Exception:
+                            df_chart = None
                     metrics = long_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
                     if metrics is None:
                         continue
@@ -8440,6 +8607,7 @@ if st.session_state.current_page == "分析中心":
                 st.session_state.results_data = candidates[:top_n]
                 st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
                 st.session_state.analysis_mode = "auto"
+                st.session_state.selected_side = "short" if auto_pick_mode == "做空模式" else "long"
         except Exception as e:
             st.error(f"自動挑股發生錯誤：{e}")
 
