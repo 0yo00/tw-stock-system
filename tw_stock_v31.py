@@ -5807,19 +5807,41 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         if avg_val_3 > avg_value_20:
             score_chip += 15
 
-    # (5) 風險扣分 -20
+    # (5) 風險扣分 -30
     score_risk = 0
-    if bar_range > 0 and upper_shadow / bar_range > 0.45:
+    warnings = []
+    has_upper_shadow = bar_range > 0 and upper_shadow / bar_range > 0.45
+    if has_upper_shadow:
         score_risk -= 8
+        warnings.append("長上影")
     is_black_today = close < open_
-    if is_black_today and vol > vol20 * 1.5:
+    has_black_vol = is_black_today and vol > vol20 * 1.5
+    if has_black_vol:
         score_risk -= 10
-    if ma5 > 0 and (close - ma5) / ma5 > 0.08:
+        warnings.append("爆量黑K")
+    bias_ma5 = (close - ma5) / ma5 if ma5 > 0 else 0
+    if bias_ma5 > 0.08:
         score_risk -= 6
+        warnings.append("離MA5過遠")
     if close <= ma5 and close <= ma10:
         score_risk -= 6
+        warnings.append("雙線下方")
     if chg_5d_pct < -3:
         score_risk -= 4
+        warnings.append(f"5日跌{chg_5d_pct:.1f}%")
+
+    high10 = float(high_s.tail(10).max())
+    dist_to_resist_pct = (high10 - close) / close * 100 if close > 0 and high10 > close else 0
+    if dist_to_resist_pct < 1.5 and dist_to_resist_pct >= 0:
+        score_risk -= 4
+        warnings.append("貼近壓力")
+
+    atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else close * 0.02
+    support_est = float(low_s.tail(10).min())
+    rr_est = (high10 - close) / max(close - support_est, atr * 0.3) if close > support_est else 0
+    if rr_est < 1.2:
+        score_risk -= 4
+        warnings.append(f"風報比低({rr_est:.1f})")
 
     total = score_trend + score_momentum + score_volume + score_chip + score_risk
     total = max(0, min(100, total))
@@ -5827,25 +5849,24 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     reasons = []
     if score_trend >= 22:
         reasons.append("趨勢強")
+    elif score_trend >= 14:
+        reasons.append("趨勢中")
     if chg_5d_pct >= 3:
         reasons.append(f"5日漲{chg_5d_pct:.1f}%")
     if vol_ratio_20 >= 1.2:
         reasons.append(f"量比{vol_ratio_20:.1f}倍")
-    if foreign_val > 0:
-        reasons.append("外資買")
-    if trust_val > 0:
-        reasons.append("投信買")
+    if has_inst:
+        if foreign_val > 0 and trust_val > 0:
+            reasons.append("外資投信雙買")
+        elif foreign_val > 0:
+            reasons.append("外資買")
+        elif trust_val > 0:
+            reasons.append("投信買")
+    else:
+        if score_chip >= 15:
+            reasons.append("成交金額轉強")
     if not reasons:
         reasons.append("綜合評分")
-
-    warnings = []
-    if score_risk < 0:
-        if bar_range > 0 and upper_shadow / bar_range > 0.45:
-            warnings.append("長上影")
-        if is_black_today and vol > vol20 * 1.5:
-            warnings.append("爆量黑K")
-        if ma5 > 0 and (close - ma5) / ma5 > 0.08:
-            warnings.append("離MA5過遠")
 
     return {
         "long_total": total,
@@ -8044,14 +8065,17 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     m4.metric("量價", f'{metrics[key_vol]}/20')
                     m5.metric("籌碼", f'{metrics[key_chip]}/15')
                     m6.metric("風險", f'{metrics[key_risk]}')
-                risk_label = "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)" if prefix == "long" else "長下影(-8), 爆量紅K(-10), 離MA5過遠(-6)"
+                _warn_text = metrics.get(key_warning, "")
+                _risk_desc = _warn_text if _warn_text else "無風險扣分"
+                _trend_desc = "均線多頭排列" if prefix == "long" and metrics[key_trend] >= 22 else "均線空頭排列" if prefix == "short" and metrics[key_trend] >= 22 else "均線條件部分符合" if metrics[key_trend] >= 8 else "均線條件不足"
+                _chip_desc = "法人買超" if prefix == "long" and metrics[key_chip] >= 12 else "法人賣超" if prefix == "short" and metrics[key_chip] >= 12 else "成交金額替代" if metrics[key_chip] >= 15 else "籌碼中性"
                 with st.expander(f"展開{label}評分明細", expanded=False):
                     detail_items = [
-                        {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30},
-                        {"項目": "動能分", "分數": metrics[key_mom], "滿分": 25, "說明": f'5日漲幅{metrics[key_chg5d]:.1f}%'},
-                        {"項目": "量價分", "分數": metrics[key_vol], "滿分": 20, "說明": f'量比20日={metrics[key_vol_ratio]:.1f}倍'},
-                        {"項目": "籌碼分", "分數": metrics[key_chip], "滿分": 15},
-                        {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": risk_label},
+                        {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30, "說明": _trend_desc},
+                        {"項目": "動能分", "分數": metrics[key_mom], "滿分": 25, "說明": f'5日漲跌幅 {metrics[key_chg5d]:.1f}%'},
+                        {"項目": "量價分", "分數": metrics[key_vol], "滿分": 20, "說明": f'量比20日 = {metrics[key_vol_ratio]:.1f} 倍'},
+                        {"項目": "籌碼分", "分數": metrics[key_chip], "滿分": 15, "說明": _chip_desc},
+                        {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": _risk_desc},
                     ]
                     st.dataframe(pd.DataFrame(detail_items), use_container_width=True, hide_index=True)
                 if metrics.get(key_warning):
