@@ -362,6 +362,22 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
     long_dt = build_long_daytrade(_dt_base)
     short_dt = build_short_daytrade(_dt_base)
 
+    _long_ok = long_dt.get("多方適合當沖") == "是"
+    _short_ok = short_dt.get("空方適合當沖") == "是"
+    if _long_ok and not _short_ok:
+        _today_dir = "今日優先做多"
+    elif _short_ok and not _long_ok:
+        _today_dir = "今日優先做空"
+    elif _long_ok and _short_ok:
+        if conclusion in ["看多", "中性偏多"]:
+            _today_dir = "今日優先做多"
+        elif conclusion in ["看空", "中性偏空"]:
+            _today_dir = "今日優先做空"
+        else:
+            _today_dir = "今日雙向皆可"
+    else:
+        _today_dir = "今日觀望"
+
     return {
         "股票": display_name_func(resolved_code, name_map), "股票代碼": resolved_code, "族群": stock_sector.get(resolved_code, "未分類"),
         "收盤": close, "支撐": support, "短期壓力": resistance, "ATR": atr,
@@ -380,6 +396,7 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
         **liquidity_profile,
         **long_dt,
         **short_dt,
+        "今日方向": _today_dir,
         "選股理由": reason,
         "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
         "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
