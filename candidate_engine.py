@@ -231,7 +231,7 @@ def build_short_strategy(row: dict):
     }
 
 
-def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol, indicators, display_name_func, stock_sector: dict, liquidity_builder=None):
+def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol, indicators, display_name_func, stock_sector: dict, liquidity_builder=None, indicator_df_store: dict | None = None):
     resolved_code, raw_df = resolve_symbol(raw_stock)
     if raw_df.empty or len(raw_df) < 20:
         return None
@@ -243,6 +243,12 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
 
     if df.empty or len(df) < 20:
         return None
+
+    if indicator_df_store is not None:
+        try:
+            indicator_df_store[str(resolved_code).strip().upper()] = df.copy()
+        except Exception:
+            pass
 
     close = round(float(df["Close"].iloc[-1]), 2)
 
