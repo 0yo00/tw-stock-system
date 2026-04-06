@@ -7965,11 +7965,9 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
             st.markdown("#### 核心摘要")
             core_top = [
                 ("收盤", f'{row["收盤"]:.2f}'),
-                ("進場", f'{row["進場"]:.2f}'),
-                ("停損", f'{row["停損"]:.2f}'),
+                ("支撐", f'{row["支撐"]:.2f}'),
                 ("短期壓力", f'{row["短期壓力"]:.2f}'),
-                ("中繼目標", f'{row["中繼目標"]:.2f}'),
-                ("突破目標", f'{row["突破目標"]:.2f}'),
+                ("ATR", f'{row.get("ATR", 0):.2f}'),
                 ("風報比", f'{row["風報比"]:.2f}'),
                 ("結論", row["結論"]),
                 ("交易訊號", row["交易訊號"]),
@@ -8096,39 +8094,57 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     _render_score_panel("short", "做空", short_metrics)
                 else:
                     st.info("不符合做空必要條件（需跌破均線、弱勢結構）")
-            st.markdown("#### 策略區")
-            st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
+            st.markdown("#### 當沖策略")
 
-            with st.expander("做多策略", expanded=False):
-                long_pairs = [
-                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
-                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
-                    ("多方建議進場", f'{row["進場"]:.2f}'),
-                    ("多方停損", f'{row["停損"]:.2f}'),
-                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
-                    ("多方突破目標", f'{row["突破目標"]:.2f}')
+            def _fmt_dt(val):
+                try:
+                    v = float(val)
+                    return f"{v:.2f}" if v > 0 else "--"
+                except (ValueError, TypeError):
+                    return "--"
+
+            with st.expander("📈 做多當沖", expanded=True):
+                _long_ok = str(row.get("多方適合當沖", "否")) == "是"
+                if _long_ok:
+                    st.success("✅ 適合做多當沖")
+                else:
+                    st.warning("⚠️ 當沖條件不佳（波動不足或風報比低）")
+                _lp = [
+                    ("多方建議進場", _fmt_dt(row.get("多方建議進場", ""))),
+                    ("多方停損", _fmt_dt(row.get("多方停損", ""))),
+                    ("當沖目標1", _fmt_dt(row.get("多方當沖目標1", ""))),
+                    ("當沖目標2", _fmt_dt(row.get("多方當沖目標2", ""))),
                 ]
-                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(long_pairs), long_cols_per_row):
-                    cols = st.columns(long_cols_per_row)
-                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                _lcols = 2 if st.session_state.mobile_mode else 4
+                cols = st.columns(_lcols)
+                for col, (label, value) in zip(cols, _lp[:_lcols]):
+                    col.metric(label, value)
+                if _lcols < 4:
+                    cols2 = st.columns(_lcols)
+                    for col, (label, value) in zip(cols2, _lp[_lcols:]):
                         col.metric(label, value)
 
-            with st.expander("做空策略", expanded=False):
-                short_pairs = [
-                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
-                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
-                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
-                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
-                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
-                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+            with st.expander("📉 做空當沖", expanded=True):
+                _short_ok = str(row.get("空方適合當沖", "否")) == "是"
+                if _short_ok:
+                    st.success("✅ 適合做空當沖")
+                else:
+                    st.warning("⚠️ 當沖條件不佳（波動不足或風報比低）")
+                _sp = [
+                    ("空方建議進場", _fmt_dt(row.get("空方建議進場", ""))),
+                    ("空方停損", _fmt_dt(row.get("空方停損", ""))),
+                    ("當沖目標1", _fmt_dt(row.get("空方當沖目標1", ""))),
+                    ("當沖目標2", _fmt_dt(row.get("空方當沖目標2", ""))),
                 ]
-                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
-                for i in range(0, len(short_pairs), short_cols_per_row):
-                    cols = st.columns(short_cols_per_row)
-                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                _scols = 2 if st.session_state.mobile_mode else 4
+                cols = st.columns(_scols)
+                for col, (label, value) in zip(cols, _sp[:_scols]):
+                    col.metric(label, value)
+                if _scols < 4:
+                    cols2 = st.columns(_scols)
+                    for col, (label, value) in zip(cols2, _sp[_scols:]):
                         col.metric(label, value)
-                st.caption("空方策略正式版：V178 已將空方短期壓力、建議進場、停損、中繼目標與跌破目標全部限制在次日可交易邊界內，避免再跑出偏波段的過寬數值。")
+                st.caption("所有價位皆為當日可用，不包含隔日或波段目標。")
 
             render_reason_block(row, "本檔判斷理由")
 
