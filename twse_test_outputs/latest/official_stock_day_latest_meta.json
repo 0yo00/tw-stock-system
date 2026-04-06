@@ -1,0 +1,19 @@
+{
+  "latest_date": "2026-04-02",
+  "ssl_mode": "TWSE:insecure_fallback / TPEx:insecure_fallback",
+  "twse_ssl_mode": "insecure_fallback",
+  "tpex_ssl_mode": "insecure_fallback",
+  "sources": [
+    "",
+    "twse_live",
+    "tpex_live"
+  ],
+  "twse_rows": 1348,
+  "tpex_rows": 999,
+  "local_latest_date": "",
+  "twse_latest_date": "2026-04-02",
+  "tpex_latest_date": "2026-04-02",
+  "twse_note": "HTTPSConnectionPool(host='openapi.twse.com.tw', port=443): Max retries exceeded with url: /v1/exchangeReport/STOCK_DAY_ALL (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Subject Key Identifier (_ssl.c:1081)')))",
+  "tpex_note": "HTTPSConnectionPool(host='www.tpex.org.tw', port=443): Max retries exceeded with url: /web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&o=csv&se=EW (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Subject Key Identifier (_ssl.c:1081)')))",
+  "combined_rows": 2347
+}

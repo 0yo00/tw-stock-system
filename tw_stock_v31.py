@@ -29,14 +29,18 @@ except Exception:
     pass
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-APP_VERSION = "V180"
+APP_VERSION = "V181"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "綜合評分與策略區以 selected_side 同步；自動挑股預設對齊做多/做空模式。"
+APP_VERSION_NOTE = "桌機預設工作台版面、側欄預設展開、導覽 active 樣式與頂部頁面標籤。"
 
 # yfinance 單次下載逾時（秒）；逾時會拋錯以避免 Streamlit 快取空結果，並讓 resolve 可改試 .TWO
 _YF_DOWNLOAD_TIMEOUT_SEC = 36.0
 
-st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
+st.set_page_config(
+    layout="wide",
+    page_title=f"台股短線系統 {APP_VERSION_LOWER}",
+    initial_sidebar_state="expanded",
+)
 st.markdown(f"""
 <div class="app-sticky-header">
   <div class="app-sticky-title">🚀 台股短線系統 <span>{APP_VERSION_LOWER}</span></div>
@@ -193,6 +197,18 @@ def inject_responsive_css():
         margin-bottom: 0.45rem;
         font-weight: 700;
     }
+    .nav-rail-sub {
+        font-size: 0.78rem;
+        color: #94a3b8;
+        margin: 0;
+        line-height: 1.45;
+    }
+    .nav-current-name {
+        font-size: 1.02rem;
+        font-weight: 800;
+        color: #f8fafc;
+        letter-spacing: 0.02em;
+    }
     .main-shell {
         border: 1px solid rgba(148, 163, 184, 0.14);
         background: rgba(15, 23, 42, 0.74);
@@ -214,8 +230,10 @@ def inject_responsive_css():
     }
     @media (min-width: 901px) {
         .block-container {
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
+            padding-left: 1.15rem !important;
+            padding-right: 1.15rem !important;
+            padding-top: 4.35rem !important;
+            max-width: min(1680px, 100%) !important;
         }
         section[data-testid="stSidebar"] {
             width: 300px !important;
@@ -227,6 +245,50 @@ def inject_responsive_css():
         }
         section[data-testid="stSidebar"] + div {
             margin-left: 0 !important;
+        }
+        /* 左側導覽：直向列表、目前頁類似桌面 App active */
+        section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+            gap: 0.15rem !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+            padding: 0.48rem 0.7rem !important;
+            margin: 0.1rem 0 !important;
+            border-radius: 10px !important;
+            border: 1px solid transparent !important;
+            transition: background 0.15s ease, border-color 0.15s ease !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+            background: rgba(255,255,255,0.045) !important;
+            border-color: rgba(148,163,184,0.14) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+            background: linear-gradient(90deg, rgba(59,130,246,0.26) 0%, rgba(59,130,246,0.07) 100%) !important;
+            border-color: rgba(96,165,250,0.5) !important;
+            box-shadow: inset 0 0 0 1px rgba(59,130,246,0.12) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label p {
+            font-weight: 600 !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p {
+            color: #e0f2fe !important;
+        }
+        .desk-banner-wrap {
+            border-left: 4px solid #3b82f6;
+        }
+        .desk-page-pill {
+            display: inline-block;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            padding: 0.3rem 0.75rem;
+            border-radius: 999px;
+            background: rgba(59,130,246,0.22);
+            border: 1px solid rgba(96,165,250,0.38);
+            color: #dbeafe;
+            vertical-align: middle;
+        }
+        .nav-current-name {
+            font-size: 1.06rem;
         }
     }
 
@@ -5311,7 +5373,7 @@ elif st.session_state.selected_side not in ("long", "short"):
 if "preset_strategy" not in st.session_state:
     st.session_state.preset_strategy = "none"
 if "mobile_mode" not in st.session_state:
-    st.session_state.mobile_mode = True
+    st.session_state.mobile_mode = False
 if "user_list" not in st.session_state:
     st.session_state.user_list = load_users()
 if "current_user" not in st.session_state:
@@ -5542,11 +5604,16 @@ def render_landing_page():
 
 
 def render_global_banner():
+    page = html_escape(st.session_state.current_page)
+    ver_note = html_escape(APP_VERSION_NOTE)
     st.markdown(
         f"""
-        <div class="main-shell" style="padding:1.05rem 1.15rem 0.85rem 1.15rem; margin-bottom:1rem;">
-          <div style="font-size:1.65rem;font-weight:900;color:#f8fafc;line-height:1.2;">🚀 台股短線系統 {APP_VERSION}</div>
-          <div style="font-size:0.95rem;color:#cbd5e1;margin-top:0.4rem;">目前頁面：{st.session_state.current_page}　｜　{APP_VERSION}：{APP_VERSION_NOTE}</div>
+        <div class="main-shell desk-banner-wrap" style="padding:1.05rem 1.2rem 0.9rem 1.2rem; margin-bottom:1rem;">
+          <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.65rem 1rem;">
+            <div style="font-size:1.62rem;font-weight:900;color:#f8fafc;line-height:1.2;">🚀 台股短線系統 {APP_VERSION}</div>
+            <span class="desk-page-pill" title="目前所在頁面">{page}</span>
+          </div>
+          <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.42rem;line-height:1.5;">工作台狀態與左側導覽同步。{APP_VERSION}：{ver_note}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -5554,6 +5621,10 @@ def render_global_banner():
 
 with st.sidebar:
     st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION}</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">AI 驅動短線交易分析平台</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="nav-card"><div class="nav-title">功能導覽</div><p class="nav-rail-sub">分析中心、市場儀表板、快照中心、持倉中心；首頁為總覽。</p></div>',
+        unsafe_allow_html=True,
+    )
     page_list = ["首頁", "分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -5618,7 +5689,12 @@ with st.sidebar:
             st.caption("目前沒有可刪除的其他使用者。")
 
     st.caption(f"目前資料分流：{st.session_state.current_user}")
-    st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。V149 直補 TPEx 法人主頁 / OpenAPI 來源，並維持盤前嚴格流動性門檻與自動挑股排序。</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="nav-card"><div class="nav-title">目前位置</div><div class="nav-current-name">'
+        + html_escape(st.session_state.current_page)
+        + '</div><div style="font-size:0.8rem;color:#94a3b8;margin-top:0.35rem;line-height:1.45;">與上方選中的導覽項目一致；四大工作台功能不變。</div></div>',
+        unsafe_allow_html=True,
+    )
     st.header("⭐ 我的最愛")
     favs = st.session_state.favorites
     if favs:
