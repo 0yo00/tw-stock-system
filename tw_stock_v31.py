@@ -2149,13 +2149,13 @@ def fetch_institutional_bundle_all():
     _inst_deadline = _inst_time.time() + 15
     source_groups = [
         ('TWSE', [
-            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(5)),
-            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(5)),
+            ('TWSE_T86_JSON', lambda: _fetch_twse_t86_json_recent_v137(1)),
+            ('TWSE_T86_CSV', lambda: _fetch_twse_t86_csv_recent_v137(1)),
             ('TWSE_OPENAPI_TWT38U_ALL', lambda: _fetch_twse_openapi_rows_v137('fund/TWT38U_ALL')),
         ]),
         ('TPEx', [
-            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(5)),
-            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(5)),
+            ('TPEX_OPENAPI_3INSTI', lambda: _fetch_tpex_openapi_three_insti_recent_v149(1)),
+            ('TPEX_3INSTI_WEB', lambda: _fetch_tpex_web_3insti_recent_v149(1)),
         ]),
     ]
     debug_rows = []
@@ -5807,41 +5807,19 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         if avg_val_3 > avg_value_20:
             score_chip += 15
 
-    # (5) 風險扣分 -30
+    # (5) 風險扣分 -20
     score_risk = 0
-    warnings = []
-    has_upper_shadow = bar_range > 0 and upper_shadow / bar_range > 0.45
-    if has_upper_shadow:
+    if bar_range > 0 and upper_shadow / bar_range > 0.45:
         score_risk -= 8
-        warnings.append("長上影")
     is_black_today = close < open_
-    has_black_vol = is_black_today and vol > vol20 * 1.5
-    if has_black_vol:
+    if is_black_today and vol > vol20 * 1.5:
         score_risk -= 10
-        warnings.append("爆量黑K")
-    bias_ma5 = (close - ma5) / ma5 if ma5 > 0 else 0
-    if bias_ma5 > 0.08:
+    if ma5 > 0 and (close - ma5) / ma5 > 0.08:
         score_risk -= 6
-        warnings.append("離MA5過遠")
     if close <= ma5 and close <= ma10:
         score_risk -= 6
-        warnings.append("雙線下方")
     if chg_5d_pct < -3:
         score_risk -= 4
-        warnings.append(f"5日跌{chg_5d_pct:.1f}%")
-
-    high10 = float(high_s.tail(10).max())
-    dist_to_resist_pct = (high10 - close) / close * 100 if close > 0 and high10 > close else 0
-    if dist_to_resist_pct < 1.5 and dist_to_resist_pct >= 0:
-        score_risk -= 4
-        warnings.append("貼近壓力")
-
-    atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else close * 0.02
-    support_est = float(low_s.tail(10).min())
-    rr_est = (high10 - close) / max(close - support_est, atr * 0.3) if close > support_est else 0
-    if rr_est < 1.2:
-        score_risk -= 4
-        warnings.append(f"風報比低({rr_est:.1f})")
 
     total = score_trend + score_momentum + score_volume + score_chip + score_risk
     total = max(0, min(100, total))
@@ -5849,24 +5827,25 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     reasons = []
     if score_trend >= 22:
         reasons.append("趨勢強")
-    elif score_trend >= 14:
-        reasons.append("趨勢中")
     if chg_5d_pct >= 3:
         reasons.append(f"5日漲{chg_5d_pct:.1f}%")
     if vol_ratio_20 >= 1.2:
         reasons.append(f"量比{vol_ratio_20:.1f}倍")
-    if has_inst:
-        if foreign_val > 0 and trust_val > 0:
-            reasons.append("外資投信雙買")
-        elif foreign_val > 0:
-            reasons.append("外資買")
-        elif trust_val > 0:
-            reasons.append("投信買")
-    else:
-        if score_chip >= 15:
-            reasons.append("成交金額轉強")
+    if foreign_val > 0:
+        reasons.append("外資買")
+    if trust_val > 0:
+        reasons.append("投信買")
     if not reasons:
         reasons.append("綜合評分")
+
+    warnings = []
+    if score_risk < 0:
+        if bar_range > 0 and upper_shadow / bar_range > 0.45:
+            warnings.append("長上影")
+        if is_black_today and vol > vol20 * 1.5:
+            warnings.append("爆量黑K")
+        if ma5 > 0 and (close - ma5) / ma5 > 0.08:
+            warnings.append("離MA5過遠")
 
     return {
         "long_total": total,
@@ -7962,28 +7941,14 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 row["法人方向"] = row.get("法人方向", "未載入") or "未載入"
                 row["法人共振"] = row.get("法人共振", "未載入") or "未載入"
                 row["法人摘要"] = "法人資料未載入；需要時再手動開啟。"
-            _today_dir = str(row.get("今日方向", ""))
-            if "做多" in _today_dir:
-                st.success(f"🟢 {_today_dir}")
-            elif "做空" in _today_dir:
-                st.error(f"🔴 {_today_dir}")
-            elif "觀望" in _today_dir:
-                st.warning(f"🟡 {_today_dir}")
-            elif "雙向" in _today_dir:
-                st.info(f"🔵 {_today_dir}")
-            else:
-                st.info(f"📊 {_today_dir or '未判定'}")
-
-            _src_mode = str(row.get("策略模式", ""))
-            if _src_mode and _today_dir and _src_mode.replace("模式", "") not in _today_dir:
-                st.caption(f"⚠️ 本檔來自「{_src_mode}」候選池，但日內當沖判定為「{_today_dir}」，請以今日方向為主要參考。")
-
             st.markdown("#### 核心摘要")
             core_top = [
                 ("收盤", f'{row["收盤"]:.2f}'),
-                ("支撐", f'{row["支撐"]:.2f}'),
+                ("進場", f'{row["進場"]:.2f}'),
+                ("停損", f'{row["停損"]:.2f}'),
                 ("短期壓力", f'{row["短期壓力"]:.2f}'),
-                ("ATR", f'{row.get("ATR", 0):.2f}'),
+                ("中繼目標", f'{row["中繼目標"]:.2f}'),
+                ("突破目標", f'{row["突破目標"]:.2f}'),
                 ("風報比", f'{row["風報比"]:.2f}'),
                 ("結論", row["結論"]),
                 ("交易訊號", row["交易訊號"]),
@@ -8079,17 +8044,14 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     m4.metric("量價", f'{metrics[key_vol]}/20')
                     m5.metric("籌碼", f'{metrics[key_chip]}/15')
                     m6.metric("風險", f'{metrics[key_risk]}')
-                _warn_text = metrics.get(key_warning, "")
-                _risk_desc = _warn_text if _warn_text else "無風險扣分"
-                _trend_desc = "均線多頭排列" if prefix == "long" and metrics[key_trend] >= 22 else "均線空頭排列" if prefix == "short" and metrics[key_trend] >= 22 else "均線條件部分符合" if metrics[key_trend] >= 8 else "均線條件不足"
-                _chip_desc = "法人買超" if prefix == "long" and metrics[key_chip] >= 12 else "法人賣超" if prefix == "short" and metrics[key_chip] >= 12 else "成交金額替代" if metrics[key_chip] >= 15 else "籌碼中性"
+                risk_label = "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)" if prefix == "long" else "長下影(-8), 爆量紅K(-10), 離MA5過遠(-6)"
                 with st.expander(f"展開{label}評分明細", expanded=False):
                     detail_items = [
-                        {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30, "說明": _trend_desc},
-                        {"項目": "動能分", "分數": metrics[key_mom], "滿分": 25, "說明": f'5日漲跌幅 {metrics[key_chg5d]:.1f}%'},
-                        {"項目": "量價分", "分數": metrics[key_vol], "滿分": 20, "說明": f'量比20日 = {metrics[key_vol_ratio]:.1f} 倍'},
-                        {"項目": "籌碼分", "分數": metrics[key_chip], "滿分": 15, "說明": _chip_desc},
-                        {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": _risk_desc},
+                        {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30},
+                        {"項目": "動能分", "分數": metrics[key_mom], "滿分": 25, "說明": f'5日漲幅{metrics[key_chg5d]:.1f}%'},
+                        {"項目": "量價分", "分數": metrics[key_vol], "滿分": 20, "說明": f'量比20日={metrics[key_vol_ratio]:.1f}倍'},
+                        {"項目": "籌碼分", "分數": metrics[key_chip], "滿分": 15},
+                        {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": risk_label},
                     ]
                     st.dataframe(pd.DataFrame(detail_items), use_container_width=True, hide_index=True)
                 if metrics.get(key_warning):
@@ -8110,57 +8072,39 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     _render_score_panel("short", "做空", short_metrics)
                 else:
                     st.info("不符合做空必要條件（需跌破均線、弱勢結構）")
-            st.markdown("#### 當沖策略")
+            st.markdown("#### 策略區")
+            st.caption("位置與進出場欄位已整合到做多策略 / 做空策略；避免重複顯示同一套資訊。")
 
-            def _fmt_dt(val):
-                try:
-                    v = float(val)
-                    return f"{v:.2f}" if v > 0 else "--"
-                except (ValueError, TypeError):
-                    return "--"
-
-            with st.expander("📈 做多當沖", expanded=True):
-                _long_ok = str(row.get("多方適合當沖", "否")) == "是"
-                if _long_ok:
-                    st.success("✅ 適合做多當沖")
-                else:
-                    st.warning("⚠️ 當沖條件不佳（波動不足或風報比低）")
-                _lp = [
-                    ("多方建議進場", _fmt_dt(row.get("多方建議進場", ""))),
-                    ("多方停損", _fmt_dt(row.get("多方停損", ""))),
-                    ("當沖目標1", _fmt_dt(row.get("多方當沖目標1", ""))),
-                    ("當沖目標2", _fmt_dt(row.get("多方當沖目標2", ""))),
+            with st.expander("做多策略", expanded=False):
+                long_pairs = [
+                    ("多方短期支撐", f'{row["支撐"]:.2f}'),
+                    ("多方短期壓力", f'{row["短期壓力"]:.2f}'),
+                    ("多方建議進場", f'{row["進場"]:.2f}'),
+                    ("多方停損", f'{row["停損"]:.2f}'),
+                    ("多方中繼目標", f'{row["中繼目標"]:.2f}'),
+                    ("多方突破目標", f'{row["突破目標"]:.2f}')
                 ]
-                _lcols = 2 if st.session_state.mobile_mode else 4
-                cols = st.columns(_lcols)
-                for col, (label, value) in zip(cols, _lp[:_lcols]):
-                    col.metric(label, value)
-                if _lcols < 4:
-                    cols2 = st.columns(_lcols)
-                    for col, (label, value) in zip(cols2, _lp[_lcols:]):
+                long_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(long_pairs), long_cols_per_row):
+                    cols = st.columns(long_cols_per_row)
+                    for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
                         col.metric(label, value)
 
-            with st.expander("📉 做空當沖", expanded=True):
-                _short_ok = str(row.get("空方適合當沖", "否")) == "是"
-                if _short_ok:
-                    st.success("✅ 適合做空當沖")
-                else:
-                    st.warning("⚠️ 當沖條件不佳（波動不足或風報比低）")
-                _sp = [
-                    ("空方建議進場", _fmt_dt(row.get("空方建議進場", ""))),
-                    ("空方停損", _fmt_dt(row.get("空方停損", ""))),
-                    ("當沖目標1", _fmt_dt(row.get("空方當沖目標1", ""))),
-                    ("當沖目標2", _fmt_dt(row.get("空方當沖目標2", ""))),
+            with st.expander("做空策略", expanded=False):
+                short_pairs = [
+                    ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
+                    ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
+                    ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
+                    ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
+                    ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
+                    ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
                 ]
-                _scols = 2 if st.session_state.mobile_mode else 4
-                cols = st.columns(_scols)
-                for col, (label, value) in zip(cols, _sp[:_scols]):
-                    col.metric(label, value)
-                if _scols < 4:
-                    cols2 = st.columns(_scols)
-                    for col, (label, value) in zip(cols2, _sp[_scols:]):
+                short_cols_per_row = 2 if st.session_state.mobile_mode else 3
+                for i in range(0, len(short_pairs), short_cols_per_row):
+                    cols = st.columns(short_cols_per_row)
+                    for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
                         col.metric(label, value)
-                st.caption("所有價位皆為當日可用，不包含隔日或波段目標。")
+                st.caption("空方策略正式版：V178 已將空方短期壓力、建議進場、停損、中繼目標與跌破目標全部限制在次日可交易邊界內，避免再跑出偏波段的過寬數值。")
 
             render_reason_block(row, "本檔判斷理由")
 
@@ -8442,11 +8386,9 @@ if st.session_state.current_page == "分析中心":
                         continue
                     if metrics["short_total"] < 60:
                         continue
-                    today_dir = item.get("今日方向", "")
-                    dir_match = "做空" in today_dir or "雙向" in today_dir
                     item = item.copy()
                     item["策略模式"] = "做空模式"
-                    item["_auto_mode_score"] = metrics["short_total"] + (10 if dir_match else -15)
+                    item["_auto_mode_score"] = metrics["short_total"]
                     item["做空總分"] = metrics["short_total"]
                     item["趨勢分"] = metrics["short_trend"]
                     item["動能分"] = metrics["short_momentum"]
@@ -8457,8 +8399,6 @@ if st.session_state.current_page == "分析中心":
                     item["風險警示"] = metrics["short_warning"]
                     item["5日漲幅%"] = metrics["short_chg5d"]
                     item["量比20日"] = metrics["short_vol_ratio"]
-                    if not dir_match:
-                        item["風險警示"] = (item["風險警示"] + "、" if item["風險警示"] else "") + "日內偏多不宜做空"
                     candidates.append(item)
                 candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
             else:
@@ -8474,11 +8414,9 @@ if st.session_state.current_page == "分析中心":
                         continue
                     if metrics["long_total"] < 60:
                         continue
-                    today_dir = item.get("今日方向", "")
-                    dir_match = "做多" in today_dir or "雙向" in today_dir
                     item = item.copy()
                     item["策略模式"] = "做多模式"
-                    item["_auto_mode_score"] = metrics["long_total"] + (10 if dir_match else -15)
+                    item["_auto_mode_score"] = metrics["long_total"]
                     item["做多總分"] = metrics["long_total"]
                     item["趨勢分"] = metrics["long_trend"]
                     item["動能分"] = metrics["long_momentum"]
@@ -8489,8 +8427,6 @@ if st.session_state.current_page == "分析中心":
                     item["風險警示"] = metrics["long_warning"]
                     item["5日漲幅%"] = metrics["long_chg5d"]
                     item["量比20日"] = metrics["long_vol_ratio"]
-                    if not dir_match:
-                        item["風險警示"] = (item["風險警示"] + "、" if item["風險警示"] else "") + "日內偏空不宜做多"
                     candidates.append(item)
                 candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
 

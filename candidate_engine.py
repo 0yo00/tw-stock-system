@@ -183,73 +183,51 @@ def _safe_float(val, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def build_long_daytrade(row: dict):
-    close = _safe_float(row.get("收盤", 0))
-    support = _safe_float(row.get("支撐", 0))
-    resistance = _safe_float(row.get("短期壓力", 0))
-    atr = _safe_float(row.get("ATR", 0))
-    if close <= 0:
-        return {"多方建議進場": "", "多方停損": "", "多方當沖目標1": "", "多方當沖目標2": "", "多方適合當沖": "否"}
-    if atr <= 0:
-        atr = close * 0.02
+def build_short_strategy(row: dict):
+    try:
+        close = _safe_float(row.get("收盤", 0))
+        support = _safe_float(row.get("支撐", 0))
+        resistance = _safe_float(row.get("短期壓力", 0))
+        breakout = _safe_float(row.get("突破目標", 0))
+    except Exception:
+        return {
+            "空方短期壓力": "",
+            "空方短期支撐": "",
+            "空方建議進場": "",
+            "空方停損": "",
+            "空方中繼目標": "",
+            "空方跌破目標": ""
+        }
 
-    entry = round(max(close - atr * 0.3, support + atr * 0.15) if support > 0 and support < close else close - atr * 0.3, 2)
-    entry = round(min(entry, close * 0.998), 2)
-    stop = round(entry - atr * 0.5, 2)
-    if stop >= entry:
-        stop = round(entry - max(atr * 0.3, 0.01), 2)
-    t1 = round(entry + atr * 0.6, 2)
-    t2 = round(entry + atr * 1.0, 2)
-    if resistance > 0 and t2 > resistance:
-        t2 = round(resistance, 2)
-    if t1 >= t2:
-        t1 = round(entry + (t2 - entry) * 0.5, 2)
+    short_resistance = resistance if resistance > 0 else close
+    short_support = support if support > 0 else close
 
-    risk = entry - stop
-    reward = t1 - entry
-    suitable = "是" if risk > 0 and reward / max(risk, 0.01) >= 1.0 and atr >= close * 0.015 else "否"
+    if str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空":
+        if short_resistance > 0 and close > 0 and abs(short_resistance - close) / max(close, 1) <= 0.03:
+            short_entry = close
+        else:
+            short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+    else:
+        short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
 
-    return {
-        "多方建議進場": entry,
-        "多方停損": stop,
-        "多方當沖目標1": t1,
-        "多方當沖目標2": t2,
-        "多方適合當沖": suitable,
-    }
+    short_stop = max(short_resistance * 1.02, breakout if breakout > 0 else 0)
+    short_stop = round(short_stop, 2) if short_stop > 0 else ""
 
-
-def build_short_daytrade(row: dict):
-    close = _safe_float(row.get("收盤", 0))
-    support = _safe_float(row.get("支撐", 0))
-    resistance = _safe_float(row.get("短期壓力", 0))
-    atr = _safe_float(row.get("ATR", 0))
-    if close <= 0:
-        return {"空方建議進場": "", "空方停損": "", "空方當沖目標1": "", "空方當沖目標2": "", "空方適合當沖": "否"}
-    if atr <= 0:
-        atr = close * 0.02
-
-    entry = round(min(close + atr * 0.2, resistance - atr * 0.1) if resistance > 0 and resistance > close else close + atr * 0.2, 2)
-    entry = round(max(entry, close * 1.002), 2)
-    stop = round(entry + atr * 0.5, 2)
-    if resistance > 0:
-        stop = round(min(stop, resistance + atr * 0.3), 2)
-    t1 = round(entry - atr * 0.6, 2)
-    t2 = round(entry - atr * 1.0, 2)
-    if support > 0 and t2 < support:
-        t2 = round(support, 2)
-    if t1 <= t2:
-        t1 = round(entry - (entry - t2) * 0.5, 2)
-
-    risk = stop - entry
-    reward = entry - t1
-    suitable = "是" if risk > 0 and reward / max(risk, 0.01) >= 1.0 and atr >= close * 0.015 else "否"
+    if short_resistance > 0 and short_support > 0:
+        width = short_resistance - short_support
+        short_mid = round(max(0.0, short_support - width * 0.5), 2) if width > 0 else round(short_support * 0.97, 2)
+        short_break = round(max(0.0, short_support - width), 2)
+    else:
+        short_mid = round(short_support * 0.97, 2) if short_support > 0 else ""
+        short_break = round(short_support * 0.94, 2) if short_support > 0 else ""
 
     return {
-        "空方建議進場": entry,
-        "空方停損": stop,
-        "空方當沖目標1": t1,
-        "空方當沖目標2": t2,
-        "空方適合當沖": suitable,
+        "空方短期壓力": round(short_resistance, 2) if short_resistance > 0 else "",
+        "空方短期支撐": round(short_support, 2) if short_support > 0 else "",
+        "空方建議進場": round(short_entry, 2) if short_entry > 0 else "",
+        "空方停損": short_stop,
+        "空方中繼目標": short_mid,
+        "空方跌破目標": short_break
     }
 
 
@@ -358,33 +336,13 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
                 "流動性排除原因": f"流動性計算失敗：{type(e).__name__}",
             }
 
-    _dt_base = {"收盤": close, "支撐": support, "短期壓力": resistance, "ATR": atr}
-    long_dt = build_long_daytrade(_dt_base)
-    short_dt = build_short_daytrade(_dt_base)
-
-    _long_ok = long_dt.get("多方適合當沖") == "是"
-    _short_ok = short_dt.get("空方適合當沖") == "是"
-    if _long_ok and not _short_ok:
-        _today_dir = "今日優先做多"
-    elif _short_ok and not _long_ok:
-        _today_dir = "今日優先做空"
-    elif _long_ok and _short_ok:
-        if conclusion in ["看多", "中性偏多"]:
-            _today_dir = "今日優先做多"
-        elif conclusion in ["看空", "中性偏空"]:
-            _today_dir = "今日優先做空"
-        else:
-            _today_dir = "今日雙向皆可"
-    else:
-        _today_dir = "今日觀望"
-
     return {
         "股票": display_name_func(resolved_code, name_map), "股票代碼": resolved_code, "族群": stock_sector.get(resolved_code, "未分類"),
-        "收盤": close, "支撐": support, "短期壓力": resistance, "ATR": atr,
+        "收盤": close, "支撐": support, "短期壓力": resistance, "中繼目標": mid_target, "突破目標": final_target,
         "星級": star, "操作評級": action_label, "結論": conclusion, "交易訊號": signal,
         "排名分組": bucket, "排名原因": rank_reason(bucket, conclusion, signal),
         "盤前建議": bias, "突破狀態": breakout_status, "突破強度": breakout_strength, "追價建議": chase,
-        "進場": entry, "停損": stop, "風報比": rr,
+        "進場": entry, "停損": stop, "目標": short_target, "風報比": rr, "ATR": atr,
         "RSI": rsi_round, "KD_K": round(k, 1), "KD_D": round(d, 1),
         "KDJ_J": round(float(df["j"].iloc[-1]), 1) if "j" in df.columns and pd.notna(df["j"].iloc[-1]) else 50.0,
         "MACD_DIF": round(float(df["macd_dif"].iloc[-1]), 2) if "macd_dif" in df.columns and pd.notna(df["macd_dif"].iloc[-1]) else 0.0,
@@ -394,13 +352,14 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
         "成交量": int(vol), "昨量": int(vol_prev), "量比5日": vol_ratio, "量能變化": vol_trend, "量能變化%": vol_change_pct,
         "價量結論": pv_label, "價量燈號": pv_light, "價量理由": "｜".join(pv_reasons),
         **liquidity_profile,
-        **long_dt,
-        **short_dt,
-        "今日方向": _today_dir,
+        **build_short_strategy({
+            "收盤": close, "支撐": support, "短期壓力": resistance, "突破目標": final_target, "中繼目標": mid_target,
+            "操作評級": action_label, "結論": conclusion
+        }),
         "選股理由": reason,
         "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
         "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
-        "摘要3": f"量價評語：{vol_trend} {vol_change_pct:+.2f}% 。",
+        "摘要3": f"量價評語：{vol_trend} {vol_change_pct:+.2f}% ，若有效突破短壓，突破後目標空間約 {dist_target}% 。",
         "_code": resolved_code, "_rank": rank,
     }
 
