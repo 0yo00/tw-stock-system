@@ -7962,6 +7962,22 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 row["法人方向"] = row.get("法人方向", "未載入") or "未載入"
                 row["法人共振"] = row.get("法人共振", "未載入") or "未載入"
                 row["法人摘要"] = "法人資料未載入；需要時再手動開啟。"
+            _today_dir = str(row.get("今日方向", ""))
+            if "做多" in _today_dir:
+                st.success(f"🟢 {_today_dir}")
+            elif "做空" in _today_dir:
+                st.error(f"🔴 {_today_dir}")
+            elif "觀望" in _today_dir:
+                st.warning(f"🟡 {_today_dir}")
+            elif "雙向" in _today_dir:
+                st.info(f"🔵 {_today_dir}")
+            else:
+                st.info(f"📊 {_today_dir or '未判定'}")
+
+            _src_mode = str(row.get("策略模式", ""))
+            if _src_mode and _today_dir and _src_mode.replace("模式", "") not in _today_dir:
+                st.caption(f"⚠️ 本檔來自「{_src_mode}」候選池，但日內當沖判定為「{_today_dir}」，請以今日方向為主要參考。")
+
             st.markdown("#### 核心摘要")
             core_top = [
                 ("收盤", f'{row["收盤"]:.2f}'),
@@ -8426,9 +8442,11 @@ if st.session_state.current_page == "分析中心":
                         continue
                     if metrics["short_total"] < 60:
                         continue
+                    today_dir = item.get("今日方向", "")
+                    dir_match = "做空" in today_dir or "雙向" in today_dir
                     item = item.copy()
                     item["策略模式"] = "做空模式"
-                    item["_auto_mode_score"] = metrics["short_total"]
+                    item["_auto_mode_score"] = metrics["short_total"] + (10 if dir_match else -15)
                     item["做空總分"] = metrics["short_total"]
                     item["趨勢分"] = metrics["short_trend"]
                     item["動能分"] = metrics["short_momentum"]
@@ -8439,6 +8457,8 @@ if st.session_state.current_page == "分析中心":
                     item["風險警示"] = metrics["short_warning"]
                     item["5日漲幅%"] = metrics["short_chg5d"]
                     item["量比20日"] = metrics["short_vol_ratio"]
+                    if not dir_match:
+                        item["風險警示"] = (item["風險警示"] + "、" if item["風險警示"] else "") + "日內偏多不宜做空"
                     candidates.append(item)
                 candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
             else:
@@ -8454,9 +8474,11 @@ if st.session_state.current_page == "分析中心":
                         continue
                     if metrics["long_total"] < 60:
                         continue
+                    today_dir = item.get("今日方向", "")
+                    dir_match = "做多" in today_dir or "雙向" in today_dir
                     item = item.copy()
                     item["策略模式"] = "做多模式"
-                    item["_auto_mode_score"] = metrics["long_total"]
+                    item["_auto_mode_score"] = metrics["long_total"] + (10 if dir_match else -15)
                     item["做多總分"] = metrics["long_total"]
                     item["趨勢分"] = metrics["long_trend"]
                     item["動能分"] = metrics["long_momentum"]
@@ -8467,6 +8489,8 @@ if st.session_state.current_page == "分析中心":
                     item["風險警示"] = metrics["long_warning"]
                     item["5日漲幅%"] = metrics["long_chg5d"]
                     item["量比20日"] = metrics["long_vol_ratio"]
+                    if not dir_match:
+                        item["風險警示"] = (item["風險警示"] + "、" if item["風險警示"] else "") + "日內偏空不宜做多"
                     candidates.append(item)
                 candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
 
