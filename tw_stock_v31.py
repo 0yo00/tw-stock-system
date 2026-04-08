@@ -5,6 +5,7 @@ import html as htmllib
 from io import StringIO
 from pathlib import Path
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
 import requests
 import urllib3
@@ -29,9 +30,9 @@ except Exception:
     pass
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-APP_VERSION = "V180"
+APP_VERSION = "V189"
 APP_VERSION_LOWER = APP_VERSION.lower()
-APP_VERSION_NOTE = "綜合評分與策略區以 selected_side 同步；自動挑股預設對齊做多/做空模式。"
+APP_VERSION_NOTE = "單股綜合評分：風險扣分改為實際觸發說明；判斷理由明確標示價漲量縮為黃燈觀察。"
 
 # yfinance 單次下載逾時（秒）；逾時會拋錯以避免 Streamlit 快取空結果，並讓 resolve 可改試 .TWO
 _YF_DOWNLOAD_TIMEOUT_SEC = 36.0
@@ -3276,7 +3277,7 @@ def price_volume_analysis(df: pd.DataFrame):
     if price_down and vol_up:
         return "價跌量增", "紅燈", ["價格下跌且量能放大", "賣壓增強", "偏空解讀"]
     if price_down and vol_down:
-        return "價跌量縮", "黃燈", ["價格回落但量能收斂", "弱勢整理或跌勢暫緩", "等待下一步方向"]
+        return "價跌量縮", "黃燈", ["價格回落且量能收斂", "偏空但動能不足／跌勢可能趨緩", "空方當沖不宜作主要依據，宜觀察"]
 
     if gap_down and price_down:
         return "跳空下跌", "紅燈", ["開盤跳空轉弱", "市場承接偏弱", "先保守看待"]
@@ -3286,7 +3287,20 @@ def price_volume_analysis(df: pd.DataFrame):
 def build_judgement_reasons(row: dict):
     reasons = []
     pv = row.get("價量結論", "")
-    if pv:
+    if pv == "價跌量縮":
+        reasons.append("價量：價跌量縮（偏空但動能不足／跌勢可能趨緩，不宜作空方當沖主依據）")
+    elif pv == "價漲量縮":
+        reasons.append(
+            "價量：價漲量縮（黃燈）— 價格上漲但量能未跟上，屬「續航待確認、不宜過度追價」，"
+            "不是綠燈強勢訊號；與下方 KD「加分」不同，此條不代表自動挑股評分已額外加點。"
+        )
+    elif pv == "價漲量增":
+        reasons.append("價量：價漲量增（綠燈）— 價量同步轉強，偏多解讀。")
+    elif pv == "價跌量增":
+        reasons.append("價量：價跌量增（紅燈）— 下跌伴放量，賣壓偏強。")
+    elif pv in ("開高走低爆量", "跳空上漲爆量", "跳空下跌", "量價中性"):
+        reasons.append(f"價量：{pv}（詳見價量燈號與摘要）")
+    elif pv:
         reasons.append(f"價量：{pv}")
     if row.get("壓力驗證", "") == "有效突破":
         reasons.append("壓力有效突破，加分")
@@ -3823,6 +3837,10 @@ def liquidity_auto_bonus(item: dict, mode: str = "general") -> float:
         score -= 4.0
     if burst_dry:
         score -= 8.0
+    if mode == "short":
+        pv = str(item.get("價量結論", "") or "")
+        if pv == "價跌量縮":
+            score -= 6.0
     return round(score, 2)
 
 CANDIDATE_FAIL_COOLDOWN_MINUTES = 5
@@ -3832,25 +3850,49 @@ def _analysis_refresh_tag() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _candidate_stock_cache_key(raw_stock: str, market_adj: int = 0):
-    return (str(raw_stock).strip().upper(), int(market_adj or 0), _analysis_refresh_tag(), APP_VERSION)
+def _candidate_pool_session_cache_tag() -> str:
+    """自動挑股專用：複合標籤，避免僅用日曆日導致盤前整早重用同一批成功結果。"""
+    meta = load_cached_official_meta()
+    latest = str(meta.get("latest_date", "") or meta.get("date", "") or "").strip() or "na"
+    try:
+        tz = ZoneInfo("Asia/Taipei")
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+    hm = now.hour * 60 + now.minute
+    if hm < 9 * 60:
+        sess = "盤前"
+        slot = f"H{now.hour:02d}"
+    elif hm <= 13 * 60 + 30:
+        sess = "交易中"
+        slot = "sess"
+    else:
+        sess = "盤後"
+        slot = "sess"
+    return f"of:{latest}|{sess}|{slot}"
+
+
+def _candidate_stock_cache_key(raw_stock: str, market_adj: int = 0, pool_tag: str | None = None):
+    day = _analysis_refresh_tag()
+    segment = f"{day}|{pool_tag}" if pool_tag else day
+    return (str(raw_stock).strip().upper(), int(market_adj or 0), segment, APP_VERSION)
 
 
 def _candidate_fail_key(raw_stock: str) -> str:
     return str(raw_stock).strip().upper()
 
 
-def _candidate_stock_cache_get(raw_stock: str, market_adj: int = 0):
+def _candidate_stock_cache_get(raw_stock: str, market_adj: int = 0, pool_tag: str | None = None):
     cache = st.session_state.setdefault("_candidate_stock_cache", {})
-    item = cache.get(_candidate_stock_cache_key(raw_stock, market_adj))
+    item = cache.get(_candidate_stock_cache_key(raw_stock, market_adj, pool_tag))
     return dict(item) if isinstance(item, dict) else None
 
 
-def _candidate_stock_cache_set(raw_stock: str, market_adj: int, item: dict | None):
+def _candidate_stock_cache_set(raw_stock: str, market_adj: int, item: dict | None, pool_tag: str | None = None):
     if not isinstance(item, dict):
         return
     cache = st.session_state.setdefault("_candidate_stock_cache", {})
-    cache[_candidate_stock_cache_key(raw_stock, market_adj)] = dict(item)
+    cache[_candidate_stock_cache_key(raw_stock, market_adj, pool_tag)] = dict(item)
     if len(cache) > 1200:
         for old_key in list(cache.keys())[:300]:
             cache.pop(old_key, None)
@@ -3939,6 +3981,65 @@ def analyze_candidate_pool_cached(candidate_pool: tuple, market_adj: int, name_m
     return results
 
 
+def render_auto_pick_engine_panel(engine_debug: dict):
+    """分析中心自動挑股：本輪候選池／快取／成敗／流動性數字一次列齊。"""
+    ed = engine_debug or {}
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("候選池總數", ed.get("candidate_count", 0))
+    m2.metric("快取重用數", ed.get("cache_hits", 0))
+    m3.metric("本輪新成功數", ed.get("new_success", 0))
+    m4.metric("本輪新失敗數", ed.get("new_failures", 0))
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("冷卻跳過數", ed.get("cooldown_skips", 0))
+    m6.metric("最終有效樣本數", ed.get("result_count", 0))
+    m7.metric("通過流動性門檻數", int(ed.get("liquidity_passed_count") or 0))
+    m8.metric("補抓救回數", ed.get("retry_recovered", 0))
+    st.caption(
+        f"快取分段：{fmt_text(str(ed.get('cache_session_tag', '') or '')) or '--'} ｜ "
+        f"技術資料重用 {ed.get('indicator_df_cached', 0)} 檔 ｜ "
+        f"本輪需刷新 {ed.get('pending_fresh_count', 0)} 檔 ｜ "
+        f"第一輪待補抓 {ed.get('retry_queue_size', 0)} 檔"
+    )
+
+
+def dataframe_from_analysis_records(records: list) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    df_result = pd.DataFrame(records)
+    df_result = ensure_dataframe_columns(df_result, list(TWSE_RESULT_DEFAULTS.keys()))
+    df_result["趨勢燈號"] = df_result.apply(lambda r: signal_light_pack(r)["趨勢燈號"], axis=1)
+    df_result["進場燈號"] = df_result.apply(lambda r: signal_light_pack(r)["進場燈號"], axis=1)
+    df_result["量能燈號"] = df_result.apply(lambda r: signal_light_pack(r)["量能燈號"], axis=1)
+    return df_result
+
+
+def _auto_pick_clear_backup_session():
+    st.session_state.auto_pick_backup_rows = None
+    st.session_state.auto_pick_backup_mode = None
+    st.session_state.auto_pick_backup_detail_code = None
+
+
+def _auto_pick_quality_blocked(debug: dict) -> tuple[bool, str]:
+    """盤前自動挑股：本輪抓取品質不足時不輸出推薦。"""
+    n = int(debug.get("candidate_count") or 0)
+    if n <= 0:
+        return False, ""
+    nh = int(debug.get("cache_hits") or 0)
+    ns = int(debug.get("new_success") or 0)
+    nf = int(debug.get("new_failures") or 0)
+    effective = nh + ns
+    tried = ns + nf
+    if nf > ns and tried >= 6:
+        return True, "本輪盤前資料品質不足，暫不建議參考自動挑股結果（本輪新抓失敗筆數大於成功筆數）。"
+    if tried >= 10 and ns < max(5, int(0.05 * n)):
+        return True, "本輪盤前資料品質不足，暫不建議參考自動挑股結果（本輪新成功數過低）。"
+    if n >= 40 and effective < max(12, int(0.25 * n)):
+        return True, "本輪盤前資料品質不足，暫不建議參考自動挑股結果（最終有效候選佔比過低）。"
+    if nh >= max(1, int(0.88 * n)) and ns == 0 and nf >= 6:
+        return True, "本輪盤前資料品質不足，暫不建議參考自動挑股結果（幾乎全為快取命中且本輪無新成功、失敗偏多）。"
+    return False, ""
+
+
 def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_map: dict, progress_hook=None):
     codes = [str(x).strip() for x in candidate_pool if str(x).strip()]
     empty_debug = {
@@ -3949,10 +4050,15 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
         "cooldown_skips": 0,
         "cooldown_rows": [],
         "failure_rows": [],
+        "retry_recovered": 0,
+        "retry_queue_size": 0,
+        "cache_session_tag": "",
+        "fresh_tried": 0,
     }
     if not codes:
         return [], empty_debug, {}
 
+    pool_tag = _candidate_pool_session_cache_tag()
     results = []
     indicator_df_store: dict[str, pd.DataFrame] = {}
     debug = {
@@ -3963,6 +4069,10 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
         "cooldown_skips": 0,
         "cooldown_rows": [],
         "failure_rows": [],
+        "retry_recovered": 0,
+        "retry_queue_size": 0,
+        "cache_session_tag": pool_tag,
+        "fresh_tried": 0,
     }
 
     pending_codes = []
@@ -3972,7 +4082,7 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
         if not code_u or code_u in seen:
             continue
         seen.add(code_u)
-        cached_item = _candidate_stock_cache_get(code_u, market_adj)
+        cached_item = _candidate_stock_cache_get(code_u, market_adj, pool_tag=pool_tag)
         if cached_item is not None:
             results.append(cached_item)
             debug["cache_hits"] += 1
@@ -3997,10 +4107,12 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
             "pending_fetch": len(pending_codes),
             "completed_fetch": debug["cache_hits"],
             "failures": 0,
+            "pending_retry": 0,
             "batch_index": 0,
             "batch_total": max(1, (len(pending_codes) + 19) // 20) if pending_codes else 0,
         })
 
+    retry_queue: list[tuple[str, str]] = []
     if pending_codes:
         import time as _time_mod
         batch_size = 20
@@ -4016,9 +4128,7 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
                         item = fut.result()
                     except Exception as e:
                         reason = f"{type(e).__name__}: {e}"
-                        _candidate_register_failure(code_u, reason)
-                        debug["new_failures"] += 1
-                        debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        retry_queue.append((code_u, reason))
                         if progress_hook:
                             progress_hook({
                                 "phase": "analyze",
@@ -4026,17 +4136,16 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
                                 "cache_hits": debug["cache_hits"],
                                 "cooldown_skips": debug["cooldown_skips"],
                                 "pending_fetch": len(pending_codes),
-                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
-                                "failures": debug["new_failures"],
+                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + len(retry_queue),
+                                "failures": len(retry_queue),
+                                "pending_retry": len(retry_queue),
                                 "batch_index": batch_idx + 1,
                                 "batch_total": num_batches,
                             })
                         continue
                     if item is None:
                         reason = "無有效日線或資料天數不足"
-                        _candidate_register_failure(code_u, reason)
-                        debug["new_failures"] += 1
-                        debug["failure_rows"].append({"股票代碼": code_u, "原因": reason})
+                        retry_queue.append((code_u, reason))
                         if progress_hook:
                             progress_hook({
                                 "phase": "analyze",
@@ -4044,13 +4153,14 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
                                 "cache_hits": debug["cache_hits"],
                                 "cooldown_skips": debug["cooldown_skips"],
                                 "pending_fetch": len(pending_codes),
-                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
-                                "failures": debug["new_failures"],
+                                "completed_fetch": debug["cache_hits"] + debug["new_success"] + len(retry_queue),
+                                "failures": len(retry_queue),
+                                "pending_retry": len(retry_queue),
                                 "batch_index": batch_idx + 1,
                                 "batch_total": num_batches,
                             })
                         continue
-                    _candidate_stock_cache_set(code_u, market_adj, item)
+                    _candidate_stock_cache_set(code_u, market_adj, item, pool_tag=pool_tag)
                     results.append(item)
                     debug["new_success"] += 1
                     if progress_hook:
@@ -4060,14 +4170,66 @@ def analyze_candidate_pool_session(candidate_pool: tuple, market_adj: int, name_
                             "cache_hits": debug["cache_hits"],
                             "cooldown_skips": debug["cooldown_skips"],
                             "pending_fetch": len(pending_codes),
-                            "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
-                            "failures": debug["new_failures"],
+                            "completed_fetch": debug["cache_hits"] + debug["new_success"] + len(retry_queue),
+                            "failures": len(retry_queue),
+                            "pending_retry": len(retry_queue),
                             "batch_index": batch_idx + 1,
                             "batch_total": num_batches,
                         })
             if batch_start + batch_size < len(pending_codes):
                 _time_mod.sleep(0.5)
 
+    debug["retry_queue_size"] = len(retry_queue)
+    if retry_queue:
+        if progress_hook:
+            progress_hook({
+                "phase": "retry",
+                "total_candidates": len(codes),
+                "cache_hits": debug["cache_hits"],
+                "cooldown_skips": debug["cooldown_skips"],
+                "pending_fetch": len(pending_codes),
+                "completed_fetch": debug["cache_hits"] + debug["new_success"],
+                "failures": 0,
+                "pending_retry": len(retry_queue),
+                "batch_index": num_batches,
+                "batch_total": num_batches,
+            })
+        import time as _time_mod
+        for code_u, r1_reason in retry_queue:
+            _time_mod.sleep(0.4)
+            fail_reason = None
+            try:
+                item = analyze_one(code_u, market_adj, name_map, indicator_df_store)
+            except Exception as e:
+                item = None
+                fail_reason = f"{type(e).__name__}: {e}"
+            if item is None:
+                if fail_reason is None:
+                    fail_reason = str(r1_reason or "無有效日線或資料天數不足")
+                _candidate_register_failure(code_u, fail_reason)
+                debug["new_failures"] += 1
+                debug["failure_rows"].append({"股票代碼": code_u, "原因": f"補抓後仍失敗：{fail_reason}"})
+            else:
+                _candidate_stock_cache_set(code_u, market_adj, item, pool_tag=pool_tag)
+                results.append(item)
+                debug["new_success"] += 1
+                debug["retry_recovered"] += 1
+            if progress_hook:
+                progress_hook({
+                    "phase": "retry",
+                    "total_candidates": len(codes),
+                    "cache_hits": debug["cache_hits"],
+                    "cooldown_skips": debug["cooldown_skips"],
+                    "pending_fetch": len(pending_codes),
+                    "completed_fetch": debug["cache_hits"] + debug["new_success"] + debug["new_failures"],
+                    "failures": debug["new_failures"],
+                    "pending_retry": 0,
+                    "batch_index": num_batches,
+                    "batch_total": num_batches,
+                })
+
+    debug["fresh_tried"] = int(debug["new_success"]) + int(debug["new_failures"])
+    debug["pending_fresh_count"] = len(pending_codes)
     debug["result_count"] = len(results)
     debug["indicator_df_cached"] = len(indicator_df_store)
     return results, debug, indicator_df_store
@@ -5928,17 +6090,35 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
 
     # (5) 風險扣分 -20
     score_risk = 0
+    risk_parts: list[str] = []
     if bar_range > 0 and upper_shadow / bar_range > 0.45:
         score_risk -= 8
+        risk_parts.append("長上影(-8)")
     is_black_today = close < open_
     if is_black_today and vol > vol20 * 1.5:
         score_risk -= 10
+        risk_parts.append("爆量黑K(-10)")
     if ma5 > 0 and (close - ma5) / ma5 > 0.08:
         score_risk -= 6
+        risk_parts.append("離MA5過遠(-6)")
     if close <= ma5 and close <= ma10:
         score_risk -= 6
+        risk_parts.append("收盤在MA5與MA10下(-6)")
     if chg_5d_pct < -3:
         score_risk -= 4
+        risk_parts.append("5日跌幅<-3%(-4)")
+
+    if risk_parts:
+        long_risk_detail = (
+            "本輪已觸發：" + "、".join(risk_parts)
+            + f"。風險欄位合計 {score_risk} 分（負值），已加進總分；總分最後限制在 0～100。"
+        )
+    else:
+        long_risk_detail = (
+            "本輪**未觸發**任何風險扣分條件，故風險欄為 0。"
+            "（可能扣分項僅在觸發時才會出現：長上影-8、爆量黑K-10、離MA5過遠-6、"
+            "收盤在雙均下-6、5日跌幅<-3%為-4。先前表內固定範例易造成誤解，已改為只顯示實際結果。）"
+        )
 
     total = score_trend + score_momentum + score_volume + score_chip + score_risk
     total = max(0, min(100, total))
@@ -5978,6 +6158,7 @@ def long_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         "long_chg5d": round(chg_5d_pct, 2),
         "long_vol_ratio": round(vol_ratio_20, 2),
         "long_close_pos": round(close_pos, 2),
+        "long_risk_detail": long_risk_detail,
     }
 
 
@@ -6049,6 +6230,10 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     if chg_5d_pct > 5:
         return None
 
+    pv_label = str(item.get("價量結論", "") or "")
+    weak_bear_shrink = pv_label == "價跌量縮"
+    strong_bear_pv = pv_label in ("價跌量增", "開高走低爆量", "跳空下跌")
+
     # ---- 評分（總分 100）----
     # (1) 趨勢分 30：空方趨勢
     score_trend = 0
@@ -6076,14 +6261,17 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
     if close_pos <= 0.3:
         score_momentum += 10
 
-    # (3) 量價分 20
+    # (3) 量價分 20：價跌量增類為空方當沖主訊號；價跌量縮不當強空加分
     score_volume = 0
     vol_ratio_20 = vol / vol20 if vol20 > 0 else 1.0
     is_black = close < open_
-    if is_black and 1.2 <= vol_ratio_20 <= 3.0:
-        score_volume += 12
-    elif is_black and 0.9 <= vol_ratio_20 < 1.2:
-        score_volume += 6
+    if weak_bear_shrink:
+        score_volume -= 6
+    else:
+        if is_black and 1.2 <= vol_ratio_20 <= 3.0:
+            score_volume += 14 if strong_bear_pv else 12
+        elif is_black and 0.9 <= vol_ratio_20 < 1.2:
+            score_volume += 4 if strong_bear_pv else 6
     tail3 = df.tail(3)
     t3_close = pd.to_numeric(tail3["Close"], errors="coerce")
     t3_open = pd.to_numeric(tail3["Open"], errors="coerce")
@@ -6097,7 +6285,10 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
             up_vols.append(v_i)
     avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
     avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
-    if avg_dn > avg_up and dn_vols:
+    if weak_bear_shrink:
+        if avg_dn > avg_up and dn_vols:
+            score_volume += 1
+    elif avg_dn > avg_up and dn_vols:
         score_volume += 8
 
     # (4) 籌碼分 15
@@ -6120,24 +6311,43 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
 
     # (5) 風險扣分 -20
     score_risk = 0
+    risk_parts_s: list[str] = []
     lower_shadow = min(close, open_) - low
     if bar_range > 0 and lower_shadow / bar_range > 0.45:
         score_risk -= 8
+        risk_parts_s.append("長下影(-8)")
     is_green = close > open_
     if is_green and vol > vol20 * 1.5:
         score_risk -= 10
+        risk_parts_s.append("爆量紅K(-10)")
     if ma5 > 0 and (ma5 - close) / ma5 > 0.08:
         score_risk -= 6
+        risk_parts_s.append("離MA5過遠(-6)")
+
+    if risk_parts_s:
+        short_risk_detail = (
+            "本輪已觸發：" + "、".join(risk_parts_s)
+            + f"。風險欄位合計 {score_risk} 分（負值），已加進總分；總分最後限制在 0～100。"
+        )
+    else:
+        short_risk_detail = (
+            "本輪**未觸發**任何風險扣分條件，故風險欄為 0。"
+            "（做空側可能扣分：長下影-8、爆量紅K-10、離MA5過遠-6，僅在觸發時列入。）"
+        )
 
     total = score_trend + score_momentum + score_volume + score_chip + score_risk
     total = max(0, min(100, total))
 
     reasons = []
+    if weak_bear_shrink:
+        reasons.append("偏空但動能不足（價跌量縮）")
     if score_trend >= 22:
         reasons.append("空方趨勢強")
     if chg_5d_pct <= -3:
         reasons.append(f"5日跌{chg_5d_pct:.1f}%")
-    if is_black and vol_ratio_20 >= 1.2:
+    if strong_bear_pv and pv_label and not weak_bear_shrink:
+        reasons.append(pv_label)
+    elif is_black and vol_ratio_20 >= 1.2 and not weak_bear_shrink:
         reasons.append(f"黑K量比{vol_ratio_20:.1f}倍")
     if foreign_val < 0:
         reasons.append("外資賣")
@@ -6147,6 +6357,8 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         reasons.append("綜合評分")
 
     warnings = []
+    if weak_bear_shrink:
+        warnings.append("價跌量縮：跌勢可能趨緩，不宜作空方當沖主依據")
     if score_risk < 0:
         if bar_range > 0 and lower_shadow / bar_range > 0.45:
             warnings.append("長下影")
@@ -6167,6 +6379,7 @@ def short_pick_compute(df: pd.DataFrame, item: dict) -> dict | None:
         "short_chg5d": round(chg_5d_pct, 2),
         "short_vol_ratio": round(vol_ratio_20, 2),
         "short_close_pos": round(close_pos, 2),
+        "short_risk_detail": short_risk_detail,
     }
 
 
@@ -6331,7 +6544,7 @@ def bearish_signal_hits(item: dict) -> int:
         hits += 1
     if signal in ["❌不進", "⏳等待"]:
         hits += 1
-    if pv in ["價跌量增", "開高走低爆量", "跳空下跌", "價跌量縮"]:
+    if pv in ["價跌量增", "開高走低爆量", "跳空下跌"]:
         hits += 1
     if kd_k is not None and kd_d is not None and kd_k < kd_d:
         hits += 1
@@ -6380,7 +6593,7 @@ def auto_pick_short_score(item: dict) -> float:
     if pv in ["價跌量增", "開高走低爆量", "跳空下跌"]:
         score += 18
     elif pv == "價跌量縮":
-        score += 8
+        score -= 8
     elif pv in ["價漲量增", "跳空上漲爆量"]:
         score -= 16
 
@@ -6437,8 +6650,10 @@ def build_short_auto_reason(item: dict) -> str:
     signal = str(item.get("交易訊號", ""))
     short_rr = calc_short_rr(item)
 
-    if pv in ["價跌量增", "開高走低爆量", "跳空下跌", "價跌量縮"]:
+    if pv in ["價跌量增", "開高走低爆量", "跳空下跌"]:
         reasons.append(pv)
+    elif pv == "價跌量縮":
+        reasons.append("價跌量縮（偏空、動能不足，觀察為主）")
     if conclusion in ["看空", "中性偏空", "中性"]:
         reasons.append(conclusion)
     if signal in ["❌不進", "⏳等待"]:
@@ -7379,6 +7594,82 @@ def resolve_position_reference_quote(row: dict):
     }
 
 
+def is_taiwan_regular_session(now: datetime | None = None) -> bool:
+    """台股一般交易時段 09:00–13:30（Asia/Taipei），週一至週五。"""
+    try:
+        tz = ZoneInfo("Asia/Taipei")
+        t = now.astimezone(tz) if now else datetime.now(tz)
+    except Exception:
+        t = datetime.now()
+    if t.weekday() >= 5:
+        return False
+    mins = t.hour * 60 + t.minute
+    return (9 * 60) <= mins <= (13 * 60 + 30)
+
+
+def resolve_position_judgment_mode(quote: dict) -> tuple[str, str]:
+    """(模式標籤, 簡短說明) — 僅供持倉中心顯示。"""
+    in_sess = is_taiwan_regular_session()
+    src = str((quote or {}).get("source", "") or "")
+    price_ok = _safe_float((quote or {}).get("price")) is not None
+    failed = "失敗" in src
+
+    if in_sess and price_ok and not failed:
+        return "盤中", "主判讀依盤中價、當日高低與波動區間推算支撐／壓力／停損／目標；盤前欄位請見下方折疊。"
+    if in_sess and failed:
+        return "回退", "交易時段內但盤中行情未取得，位階改以官方日資料／盤前分析為主。"
+    if in_sess and not price_ok:
+        return "回退", "交易時段內但無有效盤中價，位階改以官方日資料／盤前分析為主。"
+    return "回退", "非交易時段或僅有日線參考，位階以盤前分析／日資料為主。"
+
+
+def compute_intraday_position_levels(entry: float, side: str, quote: dict) -> dict | None:
+    """依盤中最新價與當日高低區間推算當沖用支撐／壓力／停損／目標（持倉中心專用）。"""
+    hi = _safe_float((quote or {}).get("high"))
+    lo = _safe_float((quote or {}).get("low"))
+    last = _safe_float((quote or {}).get("price"))
+    try:
+        entry = float(entry)
+    except (TypeError, ValueError):
+        return None
+    if entry <= 0 or hi is None or lo is None or last is None:
+        return None
+    if hi < lo:
+        hi, lo = lo, hi
+    rng = hi - lo
+    if rng <= 0:
+        rng = max(entry * 0.008, 0.08)
+
+    tick = max(entry * 0.0015, 0.05)
+
+    if side == "做空":
+        resistance = round(hi, 2)
+        support = round(lo, 2)
+        stop = entry + max(rng * 0.38, entry * 0.01, 0.1)
+        stop = min(stop, resistance + max(rng * 0.2, tick * 2))
+        target1 = entry - max(rng * 0.42, entry * 0.008, tick)
+        target2 = max(lo - tick, entry - max(rng * 0.72, entry * 0.018, tick * 2))
+        if target2 >= target1:
+            target2 = round(target1 - max(tick, entry * 0.004), 2)
+    else:
+        resistance = round(hi, 2)
+        support = round(lo, 2)
+        stop = entry - max(rng * 0.38, entry * 0.01, 0.1)
+        stop = max(stop, support - max(rng * 0.15, tick * 2))
+        target1 = entry + max(rng * 0.42, entry * 0.008, tick)
+        target2 = min(hi + tick, entry + max(rng * 0.72, entry * 0.018, tick * 2))
+        if target2 <= target1:
+            target2 = round(target1 + max(tick, entry * 0.004), 2)
+
+    return {
+        "support": round(lo, 2),
+        "resistance": round(hi, 2),
+        "stop": round(stop, 2),
+        "target1": round(target1, 2),
+        "target2": round(target2, 2),
+    }
+
+
 def kdj_signal(row: dict) -> str:
     k = _safe_float(row.get("KD_K"))
     d = _safe_float(row.get("KD_D"))
@@ -7405,35 +7696,34 @@ def macd_signal(row: dict) -> str:
     return "中性"
 
 
-def build_position_plan(row: dict, entry_price: float, side: str = "做多", shares: int = 1000, mode: str = "當沖", reference_quote: dict | None = None):
+def build_position_plan(row: dict, entry_price: float, side: str = "做多", shares: int = 1000, mode: str = "當沖", reference_quote: dict | None = None, level_override: dict | None = None):
     reference_quote = reference_quote or {}
     current_price = _safe_float(reference_quote.get("price")) or _pick_live_price(row)
-    long_support = _safe_float(row.get("支撐"))
-    long_resistance = _safe_float(row.get("短期壓力"))
-    long_stop = _safe_float(row.get("停損"))
-    long_target1 = _safe_float(row.get("中繼目標")) or _safe_float(row.get("目標")) or long_resistance
-    long_target2 = _safe_float(row.get("突破目標")) or long_resistance
-
-    short_map = build_short_strategy(row)
-    short_resistance = _safe_float(short_map.get("空方短期壓力"))
-    short_support = _safe_float(short_map.get("空方短期支撐"))
-    short_stop = _safe_float(short_map.get("空方停損"))
-    short_target1 = _safe_float(short_map.get("空方中繼目標")) or short_support
-    short_target2 = _safe_float(short_map.get("空方跌破目標"))
+    level_source = "盤前／日線分析"
+    if isinstance(level_override, dict) and all(k in level_override for k in ("support", "resistance", "stop", "target1", "target2")):
+        support = _safe_float(level_override.get("support"))
+        resistance = _safe_float(level_override.get("resistance"))
+        stop = _safe_float(level_override.get("stop"))
+        target1 = _safe_float(level_override.get("target1"))
+        target2 = _safe_float(level_override.get("target2"))
+        level_source = "盤中波動區間推算"
+    elif side == "做空":
+        short_map = build_short_strategy(row)
+        support = _safe_float(short_map.get("空方短期支撐"))
+        resistance = _safe_float(short_map.get("空方短期壓力"))
+        stop = _safe_float(short_map.get("空方停損"))
+        target1 = _safe_float(short_map.get("空方中繼目標")) or support
+        target2 = _safe_float(short_map.get("空方跌破目標"))
+    else:
+        support = _safe_float(row.get("支撐"))
+        resistance = _safe_float(row.get("短期壓力"))
+        stop = _safe_float(row.get("停損"))
+        target1 = _safe_float(row.get("中繼目標")) or _safe_float(row.get("目標")) or resistance
+        target2 = _safe_float(row.get("突破目標")) or resistance
 
     if side == "做空":
-        support = short_support
-        resistance = short_resistance
-        stop = short_stop
-        target1 = short_target1
-        target2 = short_target2
         pnl_per_share = (entry_price - current_price) if current_price is not None else None
     else:
-        support = long_support
-        resistance = long_resistance
-        stop = long_stop
-        target1 = long_target1
-        target2 = long_target2
         pnl_per_share = (current_price - entry_price) if current_price is not None else None
 
     pnl_amount = pnl_per_share * shares if pnl_per_share is not None else None
@@ -7545,6 +7835,7 @@ def build_position_plan(row: dict, entry_price: float, side: str = "做多", sha
         "day_high": _safe_float(reference_quote.get("high")),
         "day_low": _safe_float(reference_quote.get("low")),
         "day_volume": _safe_float(reference_quote.get("volume")),
+        "level_source": level_source,
     }
 
 
@@ -7639,7 +7930,7 @@ def evaluate_entry_alignment(actual_entry: float | None, plan_entry: float | Non
 
 
 
-def build_dynamic_hold_decision(row: dict, plan: dict, tracking: dict):
+def build_dynamic_hold_decision(row: dict, plan: dict, tracking: dict, intraday_primary: bool = False):
     side = plan.get("side", "做多")
     current = _safe_float(plan.get("current_price"))
     entry = _safe_float(plan.get("entry_price"))
@@ -7755,7 +8046,7 @@ def build_dynamic_hold_decision(row: dict, plan: dict, tracking: dict):
             action_hint = "靠壓力不追空"
             summary = "現價已反彈到空方壓力附近，這裡比較像等轉弱訊號，不適合直接樂觀續抱。"
             reasons = [f"現價接近空方壓力 {fmt_price_with_unit(resistance)}", "若再站上去，空方結構就會被破壞"]
-        elif conclusion in ["中性偏多", "看多"] or signal == "🔥進場":
+        elif not intraday_primary and (conclusion in ["中性偏多", "看多"] or signal == "🔥進場"):
             technical_structure = "轉弱"
             risk_level = "中高"
             advice = "觀察"
@@ -7843,7 +8134,7 @@ def build_dynamic_hold_decision(row: dict, plan: dict, tracking: dict):
             action_hint = "碰壓力先減碼"
             summary = "現價已靠近短期壓力，這裡比較像先觀察突破結果，不適合無腦續抱。"
             reasons = [f"現價接近短壓 {fmt_price_with_unit(resistance)}", "若突破不了，容易先回檔"]
-        elif conclusion in ["中性偏空", "看空"] or signal == "❌不進":
+        elif not intraday_primary and (conclusion in ["中性偏空", "看空"] or signal == "❌不進"):
             technical_structure = "轉弱"
             risk_level = "中高"
             advice = "觀察"
@@ -7905,8 +8196,8 @@ def build_position_tracking(row: dict, plan: dict):
 
     to_stop_pct = _remaining_pct(current, stop, side, "risk")
     to_resistance_pct = _remaining_pct(current, resistance, side, "up")
-    to_mid_pct = _remaining_pct(current, original.get("plan_mid_target"), side, "up")
-    to_breakout_pct = _remaining_pct(current, original.get("plan_breakout_target"), side, "up")
+    to_mid_pct = _remaining_pct(current, target1, side, "up")
+    to_breakout_pct = _remaining_pct(current, target2, side, "up")
 
     conclusion = fmt_text(row.get("結論", ""))
     signal = fmt_text(row.get("交易訊號", ""))
@@ -8069,21 +8360,12 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     return str(v) if v else "--"
             core_top = [
                 ("收盤", _fmt_row("收盤")),
-                ("進場", _fmt_row("進場")),
-                ("停損", _fmt_row("停損")),
-                ("短期壓力", _fmt_row("短期壓力")),
-                ("中繼目標", _fmt_row("中繼目標")),
-                ("突破目標", _fmt_row("突破目標")),
-                ("風報比", _fmt_row("風報比")),
                 ("結論", str(row.get("結論", "--"))),
                 ("交易訊號", str(row.get("交易訊號", "--"))),
             ]
-            top_cols = st.columns(2 if st.session_state.mobile_mode else 3)
-            step = 2 if st.session_state.mobile_mode else 3
-            for i in range(0, len(core_top), step):
-                cols = st.columns(step)
-                for col, (label, value) in zip(cols, core_top[i:i + step]):
-                    col.metric(label, value)
+            k1, k2, k3 = st.columns(3)
+            for col, (label, value) in zip((k1, k2, k3), core_top):
+                col.metric(label, value)
 
             st.markdown("#### 三大法人")
             def _safe_lot_metric(value):
@@ -8177,7 +8459,10 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                     m4.metric("量價", f'{metrics[key_vol]}/20')
                     m5.metric("籌碼", f'{metrics[key_chip]}/15')
                     m6.metric("風險", f'{metrics[key_risk]}')
-                risk_label = "長上影(-8), 爆量黑K(-10), 離MA5過遠(-6)" if prefix == "long" else "長下影(-8), 爆量紅K(-10), 離MA5過遠(-6)"
+                risk_detail_key = f"{prefix}_risk_detail"
+                risk_label = metrics.get(risk_detail_key) or (
+                    "（評分資料不足，無法列出風險明細。）"
+                )
                 with st.expander(f"展開{label}評分明細", expanded=False):
                     detail_items = [
                         {"項目": "趨勢分", "分數": metrics[key_trend], "滿分": 30},
@@ -8187,6 +8472,7 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                         {"項目": "風險扣分", "分數": metrics[key_risk], "滿分": 0, "說明": risk_label},
                     ]
                     st.dataframe(pd.DataFrame(detail_items), use_container_width=True, hide_index=True)
+                    st.caption("「風險扣分」滿分欄為 0 表示此列為扣分項而非加分項；負值會與前四項加總後再截斷至 0～100 為總分。")
                 if metrics.get(key_warning):
                     st.caption(f'⚠️ 風險警示：{metrics[key_warning]}')
                 if metrics[key_total] >= threshold:
@@ -8414,14 +8700,17 @@ if st.session_state.current_page == "分析中心":
                 help="擴充池會對大量股票逐一下載日線；本機網路慢時可能需數分鐘。建議日常先用核心池。",
             )
         st.caption("做多模式：總分≥60，趨勢+動能+量價+籌碼綜合評分；做空模式：總分≥60，同架構反向評分，篩選實戰可操作標的")
-        st.caption("V179：預設核心池；擴充池為慢速模式；自動挑股重用首輪技術指標並對 yfinance 加逾時，避免本機整批卡住。")
+        st.caption("V189：自動挑股後備區＋候選檔數同步；單股評分風險列改實際觸發說明、價量理由寫清楚。")
         st.caption("盤前嚴格流動性門檻：20日均量 ≥ 15,000 張、20日均值 ≥ 5 億、20日均振幅 ≥ 3%、近5日低量天數不超過 2 天、量能穩定比 ≥ 0.60。")
 
         op3, op4 = st.columns(2)
         manual_search = op3.button("搜尋", use_container_width=True)
         auto_pick = op4.button("自動挑股", use_container_width=True)
-        if st.session_state.get("last_candidate_pool"):
-            layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+        _ap_n = st.session_state.get("last_auto_pick_candidate_count")
+        layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+        if _ap_n is not None and layer_meta:
+            st.caption(f"上次自動挑股候選：**{_ap_n}** 檔｜{layer_meta.get('mode_label', '未記錄')}")
+        elif st.session_state.get("last_candidate_pool"):
             source_text = layer_meta.get("mode_label", "未記錄")
             st.caption(f"上次建立候選池：{len(st.session_state.get('last_candidate_pool', []))} 檔｜來源：{source_text}")
 
@@ -8437,16 +8726,21 @@ if st.session_state.current_page == "分析中心":
         st.session_state.selected_code = tmp[0]["_code"] if tmp else None
         st.session_state.analysis_mode = "manual"
         st.session_state.last_liquidity_summary = {}
+        _auto_pick_clear_backup_session()
+        st.session_state.last_auto_pick_formal_count = None
+        st.session_state.last_auto_pick_backup_count = None
 
     if auto_pick:
         try:
+            _auto_pick_clear_backup_session()
             pick_progress = st.empty()
             def _auto_pick_progress(info):
                 ph = info.get("phase", "")
+                pr = info.get("pending_retry", 0)
                 pick_progress.markdown(
                     f"**自動挑股進度** ｜ 總候選 **{info.get('total_candidates', 0)}** ｜ "
                     f"已處理 **{info.get('completed_fetch', 0)}**（快取命中 {info.get('cache_hits', 0)}、冷卻跳過 {info.get('cooldown_skips', 0)}）｜ "
-                    f"失敗 **{info.get('failures', 0)}** ｜ 批次 **{info.get('batch_index', 0)}** / **{info.get('batch_total', 0)}**"
+                    f"暫列待補抓 **{pr}** ｜ 已確定失敗 **{info.get('failures', 0)}** ｜ 批次 **{info.get('batch_index', 0)}** / **{info.get('batch_total', 0)}**"
                     + (f" ｜ *{ph}*" if ph else "")
                 )
 
@@ -8463,6 +8757,7 @@ if st.session_state.current_page == "分析中心":
                     )
 
                 st.session_state.last_candidate_pool = active_candidate_pool
+                st.session_state.last_auto_pick_candidate_count = len(active_candidate_pool)
                 st.session_state.last_candidate_pool_layer_meta = {
                     "mode_label": mode_label,
                     "selected_mode": candidate_pool_mode,
@@ -8476,12 +8771,17 @@ if st.session_state.current_page == "分析中心":
                     name_map,
                     progress_hook=_auto_pick_progress,
                 )
-                st.session_state.last_candidate_engine_summary = engine_debug
 
             pick_progress.markdown(
                 f"**自動挑股完成** ｜ 候選 **{engine_debug.get('candidate_count', 0)}** ｜ "
-                f"初評列管 **{engine_debug.get('result_count', 0)}** ｜ 本輪新成功 **{engine_debug.get('new_success', 0)}** ｜ "
-                f"失敗 **{engine_debug.get('new_failures', 0)}** ｜ 技術資料重用 **{engine_debug.get('indicator_df_cached', 0)}** 檔"
+                f"初評列管 **{engine_debug.get('result_count', 0)}** ｜ "
+                f"快取命中 **{engine_debug.get('cache_hits', 0)}** ｜ "
+                f"本輪新成功 **{engine_debug.get('new_success', 0)}** ｜ "
+                f"失敗 **{engine_debug.get('new_failures', 0)}** ｜ 補抓救回 **{engine_debug.get('retry_recovered', 0)}** ｜ "
+                f"技術資料重用 **{engine_debug.get('indicator_df_cached', 0)}** 檔"
+            )
+            st.caption(
+                "說明：「本輪新成功／失敗」只計這次實際重新下載分析的檔數；若本輪全部來自快取命中，兩者可能皆為 0，並不代表沒有資料。"
             )
 
             liquidity_passed = [x for x in raw_candidates if liquidity_pass(x)]
@@ -8505,7 +8805,38 @@ if st.session_state.current_page == "分析中心":
             }
             source_candidates = liquidity_passed
 
-            if not source_candidates:
+            engine_debug = dict(engine_debug)
+            engine_debug["liquidity_passed_count"] = len(liquidity_passed)
+            engine_debug["liquidity_raw_count"] = len(raw_candidates)
+            st.session_state.last_candidate_engine_summary = engine_debug
+            qc_blocked, qc_msg = _auto_pick_quality_blocked(engine_debug)
+            st.session_state.last_auto_pick_quality_blocked = qc_blocked
+            st.session_state.last_auto_pick_quality_message = qc_msg if qc_blocked else ""
+
+            with st.expander("自動挑股本輪資料面板（點標題可收合）", expanded=True):
+                with st.container(border=True):
+                    render_auto_pick_engine_panel(engine_debug)
+
+            if qc_blocked:
+                st.warning(qc_msg)
+                with st.expander("本輪失敗與冷卻明細", expanded=False):
+                    cooldown_rows = engine_debug.get("cooldown_rows", [])
+                    failure_rows = engine_debug.get("failure_rows", [])
+                    if cooldown_rows:
+                        st.caption("冷卻跳過")
+                        st.dataframe(pd.DataFrame(cooldown_rows), use_container_width=True, hide_index=True)
+                    if failure_rows:
+                        st.caption("本輪失敗（含補抓後仍失敗）")
+                        st.dataframe(pd.DataFrame(failure_rows), use_container_width=True, hide_index=True)
+                st.session_state.results_data = []
+                st.session_state.selected_code = None
+                st.session_state.analysis_mode = "auto"
+                st.session_state.selected_side = "short" if auto_pick_mode == "做空模式" else "long"
+                _auto_pick_clear_backup_session()
+                st.session_state.last_auto_pick_formal_count = 0
+                st.session_state.last_auto_pick_backup_count = 0
+
+            elif not source_candidates:
                 st.warning("本次候選池全部被盤前流動性門檻排除，請放寬條件或改用手動搜尋。")
                 liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
                 with st.expander("查看盤前流動性排除偵錯", expanded=True):
@@ -8524,11 +8855,7 @@ if st.session_state.current_page == "分析中心":
 
                 engine_summary = st.session_state.get("last_candidate_engine_summary", {}) or {}
                 with st.expander("查看候選池引擎偵錯摘要", expanded=False):
-                    em1, em2, em3, em4 = st.columns(4)
-                    em1.metric("候選池總數", engine_summary.get("candidate_count", 0))
-                    em2.metric("逐股快取命中", engine_summary.get("cache_hits", 0))
-                    em3.metric("本輪新增成功", engine_summary.get("new_success", 0))
-                    em4.metric("冷卻 / 失敗", int(engine_summary.get("cooldown_skips", 0)) + int(engine_summary.get("new_failures", 0)))
+                    render_auto_pick_engine_panel(engine_summary)
                     cooldown_rows = engine_summary.get("cooldown_rows", [])
                     failure_rows = engine_summary.get("failure_rows", [])
                     if cooldown_rows:
@@ -8541,88 +8868,125 @@ if st.session_state.current_page == "分析中心":
                 st.session_state.selected_code = None
                 st.session_state.analysis_mode = "auto"
                 st.session_state.selected_side = "short" if auto_pick_mode == "做空模式" else "long"
+                _auto_pick_clear_backup_session()
+                st.session_state.last_auto_pick_formal_count = 0
+                st.session_state.last_auto_pick_backup_count = 0
 
-            elif auto_pick_mode == "做空模式":
-                candidates = []
-                for item in source_candidates:
-                    code = item.get("_code", item.get("股票代碼", ""))
-                    df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
-                    if df_chart is None or df_chart.empty:
-                        try:
-                            df_chart = get_symbol_indicator_chart(code)
-                        except Exception:
-                            df_chart = None
-                    metrics = short_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
-                    if metrics is None:
-                        continue
-                    if metrics["short_total"] < 60:
-                        continue
-                    item = item.copy()
-                    item["策略模式"] = "做空模式"
-                    item["_auto_mode_score"] = metrics["short_total"]
-                    item["做空總分"] = metrics["short_total"]
-                    item["趨勢分"] = metrics["short_trend"]
-                    item["動能分"] = metrics["short_momentum"]
-                    item["量價分"] = metrics["short_volume"]
-                    item["籌碼分"] = metrics["short_chip"]
-                    item["風險扣分"] = metrics["short_risk"]
-                    item["入選原因"] = metrics["short_reason"]
-                    item["風險警示"] = metrics["short_warning"]
-                    item["5日漲幅%"] = metrics["short_chg5d"]
-                    item["量比20日"] = metrics["short_vol_ratio"]
-                    candidates.append(item)
-                candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
             else:
-                candidates = []
-                for item in source_candidates:
-                    code = item.get("_code", item.get("股票代碼", ""))
-                    df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
-                    if df_chart is None or df_chart.empty:
-                        try:
-                            df_chart = get_symbol_indicator_chart(code)
-                        except Exception:
-                            df_chart = None
-                    metrics = long_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
-                    if metrics is None:
-                        continue
-                    if metrics["long_total"] < 60:
-                        continue
-                    item = item.copy()
-                    item["策略模式"] = "做多模式"
-                    item["_auto_mode_score"] = metrics["long_total"]
-                    item["做多總分"] = metrics["long_total"]
-                    item["趨勢分"] = metrics["long_trend"]
-                    item["動能分"] = metrics["long_momentum"]
-                    item["量價分"] = metrics["long_volume"]
-                    item["籌碼分"] = metrics["long_chip"]
-                    item["風險扣分"] = metrics["long_risk"]
-                    item["入選原因"] = metrics["long_reason"]
-                    item["風險警示"] = metrics["long_warning"]
-                    item["5日漲幅%"] = metrics["long_chg5d"]
-                    item["量比20日"] = metrics["long_vol_ratio"]
-                    candidates.append(item)
-                candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
+                if auto_pick_mode == "做空模式":
+                    candidates = []
+                    for item in source_candidates:
+                        code = item.get("_code", item.get("股票代碼", ""))
+                        df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
+                        if df_chart is None or df_chart.empty:
+                            try:
+                                df_chart = get_symbol_indicator_chart(code)
+                            except Exception:
+                                df_chart = None
+                        metrics = short_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
+                        if metrics is None:
+                            continue
+                        if metrics["short_total"] < 60:
+                            continue
+                        item = item.copy()
+                        item["策略模式"] = "做空模式"
+                        item["_auto_mode_score"] = metrics["short_total"]
+                        item["做空總分"] = metrics["short_total"]
+                        item["趨勢分"] = metrics["short_trend"]
+                        item["動能分"] = metrics["short_momentum"]
+                        item["量價分"] = metrics["short_volume"]
+                        item["籌碼分"] = metrics["short_chip"]
+                        item["風險扣分"] = metrics["short_risk"]
+                        item["入選原因"] = metrics["short_reason"]
+                        item["風險警示"] = metrics["short_warning"]
+                        item["5日漲幅%"] = metrics["short_chg5d"]
+                        item["量比20日"] = metrics["short_vol_ratio"]
+                        candidates.append(item)
+                    candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
+                else:
+                    candidates = []
+                    for item in source_candidates:
+                        code = item.get("_code", item.get("股票代碼", ""))
+                        df_chart = _indicator_df_for_auto_pick(item, indicator_df_store)
+                        if df_chart is None or df_chart.empty:
+                            try:
+                                df_chart = get_symbol_indicator_chart(code)
+                            except Exception:
+                                df_chart = None
+                        metrics = long_pick_compute(df_chart, item) if df_chart is not None and not df_chart.empty else None
+                        if metrics is None:
+                            continue
+                        if metrics["long_total"] < 60:
+                            continue
+                        item = item.copy()
+                        item["策略模式"] = "做多模式"
+                        item["_auto_mode_score"] = metrics["long_total"]
+                        item["做多總分"] = metrics["long_total"]
+                        item["趨勢分"] = metrics["long_trend"]
+                        item["動能分"] = metrics["long_momentum"]
+                        item["量價分"] = metrics["long_volume"]
+                        item["籌碼分"] = metrics["long_chip"]
+                        item["風險扣分"] = metrics["long_risk"]
+                        item["入選原因"] = metrics["long_reason"]
+                        item["風險警示"] = metrics["long_warning"]
+                        item["5日漲幅%"] = metrics["long_chg5d"]
+                        item["量比20日"] = metrics["long_vol_ratio"]
+                        candidates.append(item)
+                    candidates = sorted(candidates, key=lambda x: x.get("_auto_mode_score", 0), reverse=True)
 
-            if source_candidates:
-                st.session_state.results_data = candidates[:top_n]
-                st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
+                if not candidates and source_candidates:
+                    fb = [
+                        dict(x)
+                        for x in sorted(
+                            source_candidates,
+                            key=lambda x: float(x.get("_rank") or 0),
+                            reverse=True,
+                        )[:top_n]
+                    ]
+                    if auto_pick_mode == "做空模式":
+                        for r in fb:
+                            r["策略模式"] = "後備觀察（非做空推薦）"
+                        st.session_state.auto_pick_backup_rows = fb
+                        st.session_state.auto_pick_backup_mode = "short"
+                    else:
+                        for r in fb:
+                            r["策略模式"] = "後備觀察（非做多推薦）"
+                        st.session_state.auto_pick_backup_rows = fb
+                        st.session_state.auto_pick_backup_mode = "long"
+                    st.session_state.auto_pick_backup_detail_code = None
+                    st.session_state.results_data = []
+                    st.session_state.selected_code = None
+                    st.session_state.last_auto_pick_formal_count = 0
+                    st.session_state.last_auto_pick_backup_count = len(fb)
+                else:
+                    st.session_state.results_data = candidates[:top_n]
+                    st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
+                    st.session_state.last_auto_pick_formal_count = len(st.session_state.results_data)
+                    st.session_state.last_auto_pick_backup_count = 0
                 st.session_state.analysis_mode = "auto"
                 st.session_state.selected_side = "short" if auto_pick_mode == "做空模式" else "long"
         except Exception as e:
             st.error(f"自動挑股發生錯誤：{e}")
 
     results = st.session_state.results_data
-    twse_meta = load_cached_official_meta() if st.session_state.results_data else {}
+    backup_rows = list(st.session_state.get("auto_pick_backup_rows") or [])
+    backup_detail_code = st.session_state.get("auto_pick_backup_detail_code")
+    has_auto_backup = st.session_state.analysis_mode == "auto" and bool(backup_rows)
+
+    twse_meta = load_cached_official_meta() if (st.session_state.results_data or backup_rows) else {}
     twse_hit_count = sum(1 for r in (st.session_state.results_data or []) if str(dict(r).get("TWSE命中", "")) == "是")
-    if not results:
-        st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
-    else:
+
+    if results:
         if st.session_state.analysis_mode == "manual":
             st.caption("目前模式：手動搜尋｜單股搜尋走獨立路徑，不會重跑 250 檔候選池；若該檔已在候選池分析過，會直接重用逐股快取。")
         elif st.session_state.analysis_mode == "auto":
             layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
             source_text = layer_meta.get("mode_label", "未記錄")
             st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池來源：{source_text}")
+            if st.session_state.get("last_auto_pick_formal_count") is not None:
+                stat1, stat2 = st.columns(2)
+                stat1.metric("正式推薦股數", int(st.session_state.last_auto_pick_formal_count))
+                stat2.metric("後備觀察股數", int(st.session_state.last_auto_pick_backup_count or 0))
         elif st.session_state.analysis_mode == "favorites":
             st.caption("目前模式：最愛分析")
 
@@ -8634,11 +8998,7 @@ if st.session_state.current_page == "分析中心":
             st.caption(f'官方補資料已自動降級，不影響主分析：{(twse_meta or {}).get("hybrid_error")}')
         st.caption("分析中心已改成速度優先：這裡只顯示已快取的官方資料狀態，不再自動逐檔補資料；需要時請到市場儀表板或官方資料區查看。")
 
-        df_result = pd.DataFrame(results)
-        df_result = ensure_dataframe_columns(df_result, list(TWSE_RESULT_DEFAULTS.keys()))
-        df_result["趨勢燈號"] = df_result.apply(lambda r: signal_light_pack(r)["趨勢燈號"], axis=1)
-        df_result["進場燈號"] = df_result.apply(lambda r: signal_light_pack(r)["進場燈號"], axis=1)
-        df_result["量能燈號"] = df_result.apply(lambda r: signal_light_pack(r)["量能燈號"], axis=1)
+        df_result = dataframe_from_analysis_records(results)
 
         favs = st.session_state.favorites
         if favs:
@@ -8672,6 +9032,19 @@ if st.session_state.current_page == "分析中心":
             st.caption("這一區已改成多空雙模式面板：做多看強勢延續，做空看弱勢結構、跌破與反彈不過壓力。常用條件放上面，進階條件收合避免版面太擠。")
             preset = st.session_state.preset_strategy
             filtered_df = df_result.copy()
+            if is_short_board and "_auto_mode_score" not in filtered_df.columns:
+                n = len(filtered_df)
+                idx = filtered_df.index
+                if n > 0:
+                    if "做空總分" in filtered_df.columns:
+                        s_short = pd.to_numeric(filtered_df["做空總分"], errors="coerce")
+                    else:
+                        s_short = pd.Series([float("nan")] * n, index=idx)
+                    if "_rank" in filtered_df.columns:
+                        s_rank = pd.to_numeric(filtered_df["_rank"], errors="coerce")
+                    else:
+                        s_rank = pd.Series(0.0, index=idx)
+                    filtered_df["_auto_mode_score"] = s_short.fillna(s_rank).fillna(0)
 
             if is_short_board:
                 ps1, ps2, ps3 = st.columns(3)
@@ -8951,9 +9324,74 @@ if st.session_state.current_page == "分析中心":
         select_source = sorted_df if ("sorted_df" in locals() and not sorted_df.empty) else (filtered_df if not filtered_df.empty else df_result)
         render_single_stock_detail_panel(select_source, df_result, name_map, market_info)
 
+    elif has_auto_backup:
+        layer_meta = st.session_state.get("last_candidate_pool_layer_meta", {}) or {}
+        source_text = layer_meta.get("mode_label", "未記錄")
+        st.caption(f"目前模式：自動挑股（{auto_pick_mode}）｜候選池來源：{source_text}")
+        if st.session_state.get("last_auto_pick_formal_count") is not None:
+            s1, s2 = st.columns(2)
+            s1.metric("正式推薦股數", 0)
+            s2.metric("後備觀察股數", int(st.session_state.last_auto_pick_backup_count or len(backup_rows)))
+        bm = st.session_state.get("auto_pick_backup_mode")
+        if bm == "short":
+            st.error("本輪沒有符合做空條件的正式標的（做空總分≥60）。")
+            st.info("本輪做空模式沒有正式推薦股。若要查看後備觀察股請於下方展開「後備觀察股（非推薦）」並手動選股載入單股詳細分析；後備名單僅為內建排名，**不代表做空建議**。")
+        else:
+            st.error("本輪沒有符合做多條件的正式標的（做多總分≥60）。")
+            st.info("本輪做多模式沒有正式推薦股。後備名單僅供觀察，請手動選股後再載入詳細分析。")
+        b_hit = sum(1 for r in backup_rows if str(dict(r).get("TWSE命中", "")) == "是")
+        twb1, twb2, twb3 = st.columns(3)
+        twb1.metric("後備列官方命中數", b_hit)
+        twb2.metric("官方最新日期", str((twse_meta or {}).get("latest_date", "")))
+        twb3.metric("官方來源狀態", str((twse_meta or {}).get("ssl_mode", "")))
+        with st.expander("後備觀察股（非推薦）", expanded=False):
+            bdf = pd.DataFrame(backup_rows)
+            pref_cols = ["股票", "_code", "結論", "交易訊號", "收盤", "_rank", "排名分組", "排名原因"]
+            show_cols = [c for c in pref_cols if c in bdf.columns]
+            st.dataframe(bdf[show_cols] if show_cols else bdf, use_container_width=True, hide_index=True)
+            pick_options = [("（請選擇）", None)]
+            for r in backup_rows:
+                lab = str(r.get("股票", r.get("_code", "")) or "").strip() or str(r.get("_code", ""))
+                cod = r.get("_code")
+                if cod:
+                    pick_options.append((lab, cod))
+            labels_only = [p[0] for p in pick_options]
+            pick_label = st.selectbox("選擇標的後按下方按鈕載入詳細分析（非推薦）", labels_only, key="auto_pick_backup_pick_label")
+            if st.button("載入至單股詳細分析", key="auto_pick_backup_load_detail_btn"):
+                code_pick = None
+                for lab, cod in pick_options:
+                    if lab == pick_label:
+                        code_pick = cod
+                        break
+                if code_pick:
+                    st.session_state.auto_pick_backup_detail_code = code_pick
+                    st.rerun()
 
+    else:
+        st.info("請先輸入股票後按『搜尋』，或使用『自動挑股』。")
 
-
+    if backup_detail_code and backup_rows:
+        row = next(
+            (r for r in backup_rows if str(r.get("_code", "")).strip().upper() == str(backup_detail_code).strip().upper()),
+            None,
+        )
+        if row:
+            st.divider()
+            hb1, hb2 = st.columns([4, 1])
+            with hb1:
+                st.caption("以下為**後備觀察股**之單股詳細檢視，**非**正式做空／做多推薦名單。")
+            with hb2:
+                if st.button("關閉檢視", key="auto_pick_backup_close_detail_btn"):
+                    st.session_state.auto_pick_backup_detail_code = None
+                    st.rerun()
+            df_one = dataframe_from_analysis_records([dict(row)])
+            bm = st.session_state.get("auto_pick_backup_mode")
+            if bm == "short":
+                df_one = ensure_dataframe_columns(
+                    df_one,
+                    ["空方風報比", "_bearish_hits", "空方建議進場", "空方停損", "空方短期壓力", "空方短期支撐", "空方中繼目標", "空方跌破目標"],
+                )
+            render_single_stock_detail_panel(df_one, df_one, name_map, market_info)
 
 if st.session_state.current_page == "市場儀表板":
     st.markdown('<div class="main-shell"><h3>📊 市場儀表板</h3><p>正式版市場總覽頁：集中顯示大盤快照、官方補資料狀態與分析結果聚合模組，視覺也開始往全站一致化靠攏。</p></div>', unsafe_allow_html=True)
@@ -9080,8 +9518,8 @@ if st.session_state.current_page == "持倉中心":
         else:
             st.info("目前分析中心尚未選定股票。")
 
-    st.info("V178 持倉中心維持當沖優先判讀；空方總表同步改成當沖可交易邊界，不再讓空方進場、停損與目標跑到明顯偏波段的位置。")
-    st.caption("盤中持倉判讀優先使用延遲參考價（20 分鐘快取）；若抓取失敗，才回退到官方日資料或盤前分析值。")
+    st.info("V183 持倉中心：交易時段內以「盤中持倉判讀」為主（價格＋當日區間推算停損／目標）；盤前分析收在折疊僅供對照。")
+    st.caption("盤中價優先使用延遲參考價（約 20 分鐘快取）；失敗或非交易時段會回退日線／盤前位階，並於上方標示判讀模式。")
 
 
     if calc_position:
@@ -9098,14 +9536,32 @@ if st.session_state.current_page == "持倉中心":
                 enriched_rows, _, _ = try_apply_twse_hybrid([base_row])
                 base_row = enriched_rows[0] if enriched_rows else base_row
                 position_quote = resolve_position_reference_quote(base_row)
-                base_plan = build_position_plan(base_row, float(pos_entry), pos_side, int(pos_shares), pos_mode, position_quote)
+                jmode, jnote = resolve_position_judgment_mode(position_quote)
+                level_ov = None
+                if jmode == "盤中":
+                    level_ov = compute_intraday_position_levels(float(pos_entry), pos_side, position_quote)
+                    if level_ov is None:
+                        jmode, jnote = "回退", "盤中價已取得但當日高低區間不足以推算位階，改以盤前／日線位階為主。"
+                intraday_primary = jmode == "盤中"
+                base_plan = build_position_plan(
+                    base_row,
+                    float(pos_entry),
+                    pos_side,
+                    int(pos_shares),
+                    pos_mode,
+                    position_quote,
+                    level_override=level_ov,
+                )
                 tracking = build_position_tracking(base_row, base_plan)
-                hold_decision = build_dynamic_hold_decision(base_row, base_plan, tracking)
+                hold_decision = build_dynamic_hold_decision(base_row, base_plan, tracking, intraday_primary=intraday_primary)
                 st.session_state.position_result = {
                     "row": base_row,
                     "plan": base_plan,
                     "tracking": tracking,
                     "hold_decision": hold_decision,
+                    "judgment_mode": jmode,
+                    "judgment_note": jnote,
+                    "intraday_primary": intraday_primary,
                 }
 
     position_pack = st.session_state.get("position_result")
@@ -9115,107 +9571,136 @@ if st.session_state.current_page == "持倉中心":
         row = position_pack["row"]
         plan = position_pack["plan"]
         tracking = position_pack.get("tracking") or build_position_tracking(row, plan)
-        hold_decision = position_pack.get("hold_decision") or build_dynamic_hold_decision(row, plan, tracking)
+        judgment_mode = position_pack.get("judgment_mode")
+        judgment_note = position_pack.get("judgment_note")
+        intraday_primary = bool(position_pack.get("intraday_primary"))
+        if not judgment_mode:
+            judgment_mode, judgment_note = resolve_position_judgment_mode({
+                "price": plan.get("current_price"),
+                "source": str(plan.get("price_source", "") or ""),
+            })
+            intraday_primary = judgment_mode == "盤中" and (plan.get("level_source") == "盤中波動區間推算")
+        hold_decision = position_pack.get("hold_decision")
+        if hold_decision is None:
+            hold_decision = build_dynamic_hold_decision(row, plan, tracking, intraday_primary=intraday_primary)
 
-        top1, top2, top3, top4, top5 = st.columns(5)
-        top1.metric("留倉建議", hold_decision.get("advice", "--"))
-        top2.metric("技術結構", hold_decision.get("technical_structure", "--"))
-        top3.metric("最新價格", fmt_price_with_unit(plan.get("current_price")))
-        top4.metric("未實現損益", (f"{plan.get('pnl_amount'):,.0f} 元" if plan.get("pnl_amount") is not None else "--"))
-        top5.metric("報酬率", (f"{plan.get('pnl_pct'):.2f}%" if plan.get("pnl_pct") is not None else "--"))
-        st.caption(f"價格來源：{fmt_text(plan.get('price_source', '')) or '--'}" + (f"｜更新時間：{fmt_text(plan.get('price_time', ''))}" if fmt_text(plan.get('price_time', '')) else ""))
-        q1, q2, q3 = st.columns(3)
-        q1.metric("盤中參考高", fmt_price_with_unit(plan.get("day_high")))
-        q2.metric("盤中參考低", fmt_price_with_unit(plan.get("day_low")))
-        q3.metric("盤中參考量", fmt_lots(plan.get("day_volume")))
+        st.markdown(
+            f'<div class="main-shell" style="margin-bottom:0.75rem;"><div style="font-size:1.05rem;font-weight:800;color:#f8fafc;">判讀模式：<span style="color:#60a5fa;">{html_escape(str(judgment_mode))}</span></div>'
+            f'<div style="font-size:0.88rem;color:#cbd5e1;margin-top:0.35rem;line-height:1.5;">{html_escape(str(judgment_note or ""))}</div>'
+            f'<div style="font-size:0.82rem;color:#94a3b8;margin-top:0.45rem;">價格來源：<b>{html_escape(fmt_text(plan.get("price_source", "")) or "--")}</b>'
+            f'　｜　更新時間：<b>{html_escape(fmt_text(plan.get("price_time", "")) or "--")}</b>'
+            f'　｜　位階來源：<b>{html_escape(fmt_text(plan.get("level_source", "")) or "--")}</b></div></div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.container(border=True):
+            st.markdown("### 盤中持倉判讀（主判讀）")
+            st.caption("此區以「你的實際成本 vs 目前價格與當日區間推算的位階」為主；盤前分析請展開下方次判讀。")
+            a1, a2, a3, a4, a5 = st.columns(5)
+            a1.metric("實際進場價", fmt_price_with_unit(plan.get("entry_price")))
+            a2.metric("盤中最新價", fmt_price_with_unit(plan.get("current_price")))
+            a3.metric("未實現損益", (f"{plan.get('pnl_amount'):,.0f} 元" if plan.get("pnl_amount") is not None else "--"))
+            a4.metric("報酬率", (f"{plan.get('pnl_pct'):.2f}%" if plan.get("pnl_pct") is not None else "--"))
+            a5.metric("留倉建議", hold_decision.get("advice", "--"))
+            h1, h2, h3 = st.columns(3)
+            h1.metric("盤中高參考", fmt_price_with_unit(plan.get("day_high")))
+            h2.metric("盤中低參考", fmt_price_with_unit(plan.get("day_low")))
+            h3.metric("盤中參考量", fmt_lots(plan.get("day_volume")))
+
+            lb_stop = "到盤中停損剩餘" if intraday_primary else "到停損剩餘"
+            lb_res = "到盤中壓力空間" if intraday_primary else "到短壓空間"
+            lb_m = "到盤中第一目標空間" if intraday_primary else "到第一目標空間"
+            lb_b = "到盤中第二目標空間" if intraday_primary else "到第二目標空間"
+            lb_sn = "盤中當沖停損" if intraday_primary else "停損"
+            lb_sup = "盤中支撐參考" if intraday_primary else "支撐參考"
+            lb_pr = "盤中壓力參考" if intraday_primary else "壓力參考"
+            lb_t1 = "盤中第一目標" if intraday_primary else "第一目標"
+            lb_t2 = "盤中第二目標" if intraday_primary else "第二目標"
+
+            st.markdown("#### 距離與位階（對應主判讀）")
+            lv1, lv2, lv3, lv4 = st.columns(4)
+            lv1.metric(lb_stop, (f"{tracking.get('to_stop_pct'):.2f}%" if tracking.get("to_stop_pct") is not None else "--"))
+            lv2.metric(lb_res, (f"{tracking.get('to_resistance_pct'):.2f}%" if tracking.get("to_resistance_pct") is not None else "--"))
+            lv3.metric(lb_m, (f"{tracking.get('to_mid_pct'):.2f}%" if tracking.get("to_mid_pct") is not None else "--"))
+            lv4.metric(lb_b, (f"{tracking.get('to_breakout_pct'):.2f}%" if tracking.get("to_breakout_pct") is not None else "--"))
+            lv5, lv6, lv7, lv8 = st.columns(4)
+            lv5.metric(lb_sup, fmt_price_with_unit(plan.get("support")))
+            lv6.metric(lb_pr, fmt_price_with_unit(plan.get("resistance")))
+            lv7.metric(lb_sn, fmt_price_with_unit(plan.get("stop")))
+            lv8.metric(lb_t1, fmt_price_with_unit(plan.get("target1")))
+            t2a, _t2b, _t2c, _t2d = st.columns(4)
+            t2a.metric(lb_t2, fmt_price_with_unit(plan.get("target2")))
+
+            st.markdown("#### 續抱／減碼／出場（盤中邏輯）")
+            d1, d2 = st.columns([1.2, 2.8] if not st.session_state.mobile_mode else [1, 1])
+            with d1:
+                st.metric("建議動作", hold_decision.get("action_hint", "--"))
+                st.metric("技術結構", hold_decision.get("technical_structure", "--"))
+                st.metric("風險等級", hold_decision.get("risk_level", "--"))
+                st.metric("部位狀態", hold_decision.get("position_state", "--"))
+            with d2:
+                st.write(hold_decision.get("summary", "--"))
+                for i, reason in enumerate(hold_decision.get("reasons", []), start=1):
+                    st.write(f"{i}. {reason}")
+            st.caption(f"成本區間描述：{fmt_text(plan.get('cost_zone', '')) or '--'}　｜　快節奏提示：**{plan.get('action', '--')}** — {plan.get('reason', '--')}")
 
         chips = [
             f"方向：{plan.get('side', '--')}",
             f"模式：{plan.get('mode', '--')}",
-            f"風險等級：{hold_decision.get('risk_level', '--')}",
-            f"部位狀態：{hold_decision.get('position_state', '--')}",
-            f"計畫對齊：{tracking.get('alignment', '--')}",
-            f"系統結論：{tracking.get('plan_conclusion', '--')}",
-            f"交易訊號：{tracking.get('plan_signal', '--')}",
+            f"位階：{plan.get('level_source', '--')}",
+            f"風險：{hold_decision.get('risk_level', '--')}",
+            f"部位：{hold_decision.get('position_state', '--')}",
+            f"計畫對齊（對盤前進場）：{tracking.get('alignment', '--')}",
         ]
+        if not intraday_primary:
+            chips.extend([
+                f"盤前結論：{tracking.get('plan_conclusion', '--')}",
+                f"盤前訊號：{tracking.get('plan_signal', '--')}",
+            ])
+        else:
+            chips.append("盤前結論／訊號：見下方「原始盤前計畫」折疊")
         render_position_status_chips(chips)
 
-        with st.expander("動態留倉判讀", expanded=False):
-            st.caption("用你現在看到的價位，直接判斷這筆單適不適合續抱、減碼或出場。")
-            d1, d2 = st.columns([1.2, 2.8] if not st.session_state.mobile_mode else [1,1])
-            with d1:
-                with st.container(border=True):
-                    st.markdown("#### 留倉判斷")
-                    st.metric("建議動作", hold_decision.get("action_hint", "--"))
-                    st.metric("風險等級", hold_decision.get("risk_level", "--"))
-                    st.metric("部位狀態", hold_decision.get("position_state", "--"))
-            with d2:
-                with st.container(border=True):
-                    st.markdown("#### 判斷理由")
-                    st.write(hold_decision.get("summary", "--"))
-                    for i, reason in enumerate(hold_decision.get("reasons", []), start=1):
-                        st.write(f"{i}. {reason}")
+        with st.expander("原始盤前計畫（次判讀／僅供對照）", expanded=False):
+            st.caption("以下為 analyze_one 產出的盤前／日線計畫，用來檢查實際進場是否偏離原規劃，不作盤中主判讀。")
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("原始結論", tracking.get("plan_conclusion", "--"))
+            p2.metric("原始訊號", tracking.get("plan_signal", "--"))
+            p3.metric("原始進場", fmt_price_with_unit(tracking.get("plan_entry")))
+            p4.metric("原始風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
+            p5, p6, p7, p8 = st.columns(4)
+            p5.metric("原始停損", fmt_price_with_unit(tracking.get("plan_stop")))
+            p6.metric("原始短期壓力", fmt_price_with_unit(tracking.get("plan_resistance")))
+            p7.metric("原始中繼目標", fmt_price_with_unit(tracking.get("plan_mid_target")))
+            p8.metric("原始突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
 
-        render_section_divider("現況對照", "先直接看現在離停損、壓力、中繼、突破各還有多少空間，這是持倉中心最優先資訊。")
-        lv1, lv2, lv3, lv4 = st.columns(4)
-        lv1.metric("到停損剩餘", (f"{tracking.get('to_stop_pct'):.2f}%" if tracking.get("to_stop_pct") is not None else "--"))
-        lv2.metric("到短壓空間", (f"{tracking.get('to_resistance_pct'):.2f}%" if tracking.get("to_resistance_pct") is not None else "--"))
-        lv3.metric("到中繼空間", (f"{tracking.get('to_mid_pct'):.2f}%" if tracking.get("to_mid_pct") is not None else "--"))
-        lv4.metric("到突破空間", (f"{tracking.get('to_breakout_pct'):.2f}%" if tracking.get("to_breakout_pct") is not None else "--"))
-
-        lv5, lv6, lv7, lv8 = st.columns(4)
-        lv5.metric("停損", fmt_price_with_unit(plan.get("stop")))
-        lv6.metric("短期壓力", fmt_price_with_unit(plan.get("resistance")))
-        lv7.metric("第一目標", fmt_price_with_unit(plan.get("target1")))
-        lv8.metric("第二目標", fmt_price_with_unit(plan.get("target2")))
-
-        render_section_divider("原始計畫", "再回頭看原始規劃，確認這筆持倉最初的進出場設計。")
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("原始進場", fmt_price_with_unit(tracking.get("plan_entry")))
-        p2.metric("原始停損", fmt_price_with_unit(tracking.get("plan_stop")))
-        p3.metric("原始短期壓力", fmt_price_with_unit(tracking.get("plan_resistance")))
-        p4.metric("原始風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
-        p5, p6, p7, p8 = st.columns(4)
-        p5.metric("原始中繼目標", fmt_price_with_unit(tracking.get("plan_mid_target")))
-        p6.metric("原始突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
-        p7.metric("原始結論", tracking.get("plan_conclusion", "--"))
-        p8.metric("原始訊號", tracking.get("plan_signal", "--"))
-
-        render_section_divider("你的成本 vs 原始計畫", "這裡不是看賺賠而已，而是確認你目前持倉是否偏離原始規劃。")
-        c1, c2 = st.columns([1.2, 2.8] if not st.session_state.mobile_mode else [1,1])
-        with c1:
-            with st.container(border=True):
-                st.markdown("#### 計畫對齊")
+            st.markdown("##### 你的成本 vs 原始盤前進場")
+            c1, c2 = st.columns([1.2, 2.8] if not st.session_state.mobile_mode else [1, 1])
+            with c1:
                 st.metric("實際成本", fmt_price_with_unit(plan.get("entry_price")))
                 st.metric("偏離原始進場", (f"{tracking.get('entry_gap_pct'):+.2f}%" if tracking.get("entry_gap_pct") is not None else "--"))
                 st.write(tracking.get("alignment", "--"))
-        with c2:
-            with st.container(border=True):
-                st.markdown("#### 偏離說明")
+            with c2:
                 st.write(tracking.get("alignment_note", "--"))
                 st.caption(tracking.get("status_note", ""))
-                st.write(f"系統目前建議：**{plan.get('action', '--')}**")
-                st.write(f"原因：{plan.get('reason', '--')}")
 
-        with st.expander("技術與結構", expanded=False):
-            st.caption("正式版欄位順序同步：收盤 → 進場 → 停損 → 壓力 → 目標 → 風報比 → 結論 → 交易訊號。")
+            st.markdown("##### 盤前技術欄位（日線分析）")
             core1, core2, core3, core4 = st.columns(4)
-            core1.metric("收盤", fmt_price_with_unit(row.get("收盤")))
-            core2.metric("進場", fmt_price_with_unit(tracking.get("plan_entry")))
-            core3.metric("停損", fmt_price_with_unit(tracking.get("plan_stop")))
-            core4.metric("短期壓力", fmt_price_with_unit(tracking.get("plan_resistance")))
+            core1.metric("收盤（分析基準）", fmt_price_with_unit(row.get("收盤")))
+            core2.metric("盤前進場", fmt_price_with_unit(tracking.get("plan_entry")))
+            core3.metric("盤前停損", fmt_price_with_unit(tracking.get("plan_stop")))
+            core4.metric("盤前短壓", fmt_price_with_unit(tracking.get("plan_resistance")))
             core5, core6, core7, core8 = st.columns(4)
-            core5.metric("中繼目標", fmt_price_with_unit(tracking.get("plan_mid_target")))
-            core6.metric("突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
-            core7.metric("風報比", (f"{tracking.get('plan_rr'):.2f}" if tracking.get("plan_rr") is not None else "--"))
-            core8.metric("結論 / 訊號", f"{tracking.get('plan_conclusion', '--')} / {tracking.get('plan_signal', '--')}")
-
+            core5.metric("盤前中繼", fmt_price_with_unit(tracking.get("plan_mid_target")))
+            core6.metric("盤前突破目標", fmt_price_with_unit(tracking.get("plan_breakout_target")))
+            core7.metric("量能變化", fmt_text(row.get("量能變化", "")) or "--")
+            core8.metric("突破狀態", fmt_text(row.get("突破狀態", "")) or "--")
             rv1, rv2, rv3, rv4, rv5 = st.columns(5)
             rv1.metric("KDJ判讀", kdj_signal(row))
             rv2.metric("MACD判讀", macd_signal(row))
-            rv3.metric("量能變化", fmt_text(row.get("量能變化", "")) or "--")
-            rv4.metric("突破狀態", fmt_text(row.get("突破狀態", "")) or "--")
-            rv5.metric("官方最新日資料", fmt_text(row.get("TWSE來源", "")) or "未命中")
+            rv3.metric("價量結論", fmt_text(row.get("價量結論", "")) or "--")
+            rv4.metric("官方日資料", fmt_text(row.get("TWSE來源", "")) or "未命中")
+            rv5.metric("星級", fmt_text(row.get("星級", "")) or "--")
 
         lower_cols = st.columns(2) if not st.session_state.mobile_mode else None
         if lower_cols is None:
