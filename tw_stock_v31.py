@@ -4,13 +4,15 @@ import re
 import html as htmllib
 from io import StringIO
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+import ssl
 from urllib.request import Request, urlopen
 import requests
 import urllib3
 from urllib.error import URLError, HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+import threading
 import warnings
 import logging
 
@@ -30,228 +32,624 @@ except Exception:
     pass
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+# yfinance 非執行緒安全：並行自動挑股時若同時 download 多檔，曾出現多檔 OHLC 錯位／相同收盤。
+_YFIN_DOWNLOAD_LOCK = threading.Lock()
+
 APP_VERSION = "V189"
 APP_VERSION_LOWER = APP_VERSION.lower()
 APP_VERSION_NOTE = "單股綜合評分：風險扣分改為實際觸發說明；判斷理由明確標示價漲量縮為黃燈觀察。"
 
 # yfinance 單次下載逾時（秒）；逾時會拋錯以避免 Streamlit 快取空結果，並讓 resolve 可改試 .TWO
 _YF_DOWNLOAD_TIMEOUT_SEC = 36.0
+# 大盤 ^TWII 日線：加權採「靜態收盤基準」後不需頻繁重抓，適度拉長 TTL 減負擔
+_MARKET_DATA_CACHE_TTL_SEC = 600
 
 st.set_page_config(layout="wide", page_title=f"台股短線系統 {APP_VERSION_LOWER}")
 st.markdown(f"""
 <div class="app-sticky-header">
-  <div class="app-sticky-title">🚀 台股短線系統 <span>{APP_VERSION_LOWER}</span></div>
+  <div class="app-sticky-inner">
+    <div class="app-sticky-left">
+      <div class="app-sticky-title">台股短線系統 <span>{APP_VERSION_LOWER}</span></div>
+    </div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
 def inject_responsive_css():
     st.markdown("""
     <style>
+
+    /* ═══════════════════════════════════════════════════════════════
+       DESIGN SYSTEM — 台股短線系統 V189
+       色調：深海藍底 + 電藍高亮 + 綠/紅語意色
+    ═══════════════════════════════════════════════════════════════ */
+
+    /* ── 全域底色 ── */
+    .stApp { background: #080f1c; }
+
+    /* ── 主內容區 padding ── */
     .block-container {
-        padding-top: 4.1rem;
+        padding-top: 4.4rem;
         padding-bottom: 2rem;
         max-width: 100% !important;
     }
-    .app-sticky-header {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        z-index: 9999;
-        backdrop-filter: blur(10px);
-        background: rgba(14, 17, 23, 0.88);
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-        padding: 0.55rem 0.9rem;
-    }
-    .app-sticky-title {
-        font-size: 1.02rem;
-        font-weight: 700;
-        color: #f8fafc;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .app-sticky-title span {
-        color: #60a5fa;
-    }
-    .compare-matrix {
-        width: 100%;
-        border-collapse: collapse;
-        margin: 0.35rem 0 0.9rem 0;
-        font-size: 0.92rem;
-        overflow: hidden;
-        border-radius: 14px;
-        border: 1px solid rgba(148, 163, 184, 0.18);
-    }
-    .compare-matrix th, .compare-matrix td {
-        padding: 0.6rem 0.7rem;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-        text-align: left;
-        vertical-align: top;
-    }
-    .compare-matrix th {
-        background: rgba(255,255,255,0.04);
-        font-weight: 700;
-    }
-    .compare-matrix tr:last-child td {
-        border-bottom: none;
-    }
-    .compare-chip-wrap {
-        display: flex;
-        gap: 0.45rem;
-        flex-wrap: wrap;
-        margin: 0.2rem 0 0.8rem 0;
-    }
-    .compare-chip {
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 999px;
-        padding: 0.32rem 0.7rem;
-        font-size: 0.82rem;
-        background: rgba(255,255,255,0.03);
-    }
-    div[data-testid="stMetric"] {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 14px;
-        padding: 12px 14px;
-    }
-    div[data-testid="stMetricLabel"] p {
-        font-size: 0.90rem !important;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.9rem !important;
-        line-height: 1.15 !important;
-    }
-    div[data-testid="stMetricDelta"] {
-        font-size: 0.85rem !important;
-    }
-    .stDataFrame, div[data-testid="stDataFrame"] {
-        border-radius: 14px;
+    @media (min-width: 901px) {
+        .block-container {
+            padding-left: 1.2rem !important;
+            padding-right: 1.2rem !important;
+        }
     }
     @media (max-width: 900px) {
         .block-container {
-            padding-left: 0.8rem;
-            padding-right: 0.8rem;
-        }
-        div[data-testid="column"] {
-            min-width: 100% !important;
-            flex: 1 1 100% !important;
-        }
-        div[data-testid="stMetric"] {
-            padding: 10px 12px;
-        }
-        div[data-testid="stMetricLabel"] p {
-            font-size: 0.80rem !important;
-        }
-        div[data-testid="stMetricValue"] {
-            font-size: 1.45rem !important;
-        }
-        h1 {
-            font-size: 1.55rem !important;
-            margin-top: 0.2rem !important;
-        }
-        h2, h3 {
-            font-size: 1.20rem !important;
-        }
-        .app-sticky-header {
-            padding: 0.58rem 0.8rem;
-        }
-        .app-sticky-title {
-            font-size: 0.95rem;
-        }
-        .compare-matrix {
-            font-size: 0.84rem;
-        }
-        .compare-matrix th, .compare-matrix td {
-            padding: 0.5rem 0.55rem;
-        }
-        .stTabs [data-baseweb="tab-list"] button {
-            padding-left: 0.5rem !important;
-            padding-right: 0.5rem !important;
+            padding-left: 0.75rem;
+            padding-right: 0.75rem;
         }
     }
-    .stApp {
-        background: #0b1220;
+
+    /* ══════════════════════════════════════════
+       STICKY HEADER（頂部常駐列）
+    ══════════════════════════════════════════ */
+    .app-sticky-header {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        z-index: 9999;
+        background: rgba(8, 15, 28, 0.92);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(59, 110, 248, 0.18);
+        padding: 0;
+        height: 44px;
+        display: flex;
+        align-items: center;
     }
+    .app-sticky-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        padding: 0 1rem;
+        gap: 12px;
+    }
+    .app-sticky-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+    }
+    .app-sticky-title {
+        font-size: 0.95rem;
+        font-weight: 800;
+        color: #e8f0ff;
+        white-space: nowrap;
+        letter-spacing: -0.01em;
+    }
+    .app-sticky-title span { color: #5b9aff; }
+    .app-sticky-divider {
+        width: 1px; height: 16px;
+        background: rgba(100, 140, 220, 0.2);
+        flex-shrink: 0;
+    }
+    .topbar-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 9px;
+        border-radius: 99px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        white-space: nowrap;
+        border: 1px solid transparent;
+    }
+    .topbar-pill.bull {
+        background: rgba(34, 197, 94, 0.10);
+        border-color: rgba(34, 197, 94, 0.22);
+        color: #4ade80;
+    }
+    .topbar-pill.bear {
+        background: rgba(239, 68, 68, 0.10);
+        border-color: rgba(239, 68, 68, 0.22);
+        color: #f87171;
+    }
+    .topbar-pill.neu {
+        background: rgba(100, 160, 255, 0.10);
+        border-color: rgba(100, 160, 255, 0.22);
+        color: #93c5fd;
+    }
+    .topbar-live-dot {
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: #4ade80;
+        animation: blink 2.2s ease-in-out infinite;
+        flex-shrink: 0;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .topbar-idx {
+        font-size: 0.75rem;
+        color: #8ab0e0;
+        white-space: nowrap;
+    }
+    .topbar-idx strong { color: #d0e8ff; font-weight: 700; }
+    .topbar-idx .up  { color: #4ade80; }
+    .topbar-idx .dn  { color: #f87171; }
+    @media (max-width: 900px) {
+        .topbar-pill { font-size: 0.68rem; padding: 2px 7px; }
+        .topbar-idx  { font-size: 0.70rem; }
+        .app-sticky-title { font-size: 0.85rem; }
+    }
+
+    /* ══════════════════════════════════════════
+       SIDEBAR
+    ══════════════════════════════════════════ */
     section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
-        border-right: 1px solid rgba(148, 163, 184, 0.14);
+        background: #0a1220 !important;
+        border-right: 1px solid rgba(59, 110, 248, 0.14) !important;
     }
     section[data-testid="stSidebar"] > div {
-        padding-top: 1rem;
-    }
-    .nav-card {
-        border: 1px solid rgba(148, 163, 184, 0.14);
-        background: rgba(255,255,255,0.03);
-        border-radius: 16px;
-        padding: 0.95rem 1rem;
-        margin-bottom: 0.9rem;
-    }
-    .nav-title {
-        font-size: 0.82rem;
-        letter-spacing: .04em;
-        color: #93c5fd;
-        margin-bottom: 0.45rem;
-        font-weight: 700;
-    }
-    .main-shell {
-        border: 1px solid rgba(148, 163, 184, 0.14);
-        background: rgba(15, 23, 42, 0.74);
-        border-radius: 18px;
-        padding: 0.8rem 0.95rem 0.35rem 0.95rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 8px 30px rgba(0,0,0,0.18);
-    }
-    .main-shell h3 {
-        margin-bottom: 0.2rem;
-    }
-    .main-shell p {
-        color: #cbd5e1;
-        margin-bottom: 0;
-        font-size: 0.92rem;
-    }
-    div[data-testid="stRadio"] label p {
-        font-size: 0.95rem !important;
+        padding-top: 0.8rem;
     }
     @media (min-width: 901px) {
-        .block-container {
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
-        }
         section[data-testid="stSidebar"] {
-            width: 300px !important;
-            min-width: 300px !important;
+            width: 240px !important;
+            min-width: 240px !important;
         }
         section[data-testid="stSidebar"] > div {
-            width: 300px !important;
-            min-width: 300px !important;
+            width: 240px !important;
+            min-width: 240px !important;
         }
         section[data-testid="stSidebar"] + div {
             margin-left: 0 !important;
         }
     }
 
-    .dashboard-card {
-        border: 1px solid rgba(148, 163, 184, 0.14);
-        background: rgba(255,255,255,0.025);
+    /* Sidebar logo card */
+    .nav-card {
+        background: rgba(59, 110, 248, 0.06);
+        border: 1px solid rgba(59, 110, 248, 0.14);
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    .nav-title {
+        font-size: 0.72rem;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        color: #3b6ef8;
+        margin-bottom: 0.3rem;
+        font-weight: 700;
+    }
+
+    /* st.radio 導覽選單美化 */
+    div[data-testid="stRadio"] > div {
+        gap: 4px !important;
+        display: flex;
+        flex-direction: column;
+    }
+    div[data-testid="stRadio"] label {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px !important;
+        border-radius: 10px !important;
+        border: 1px solid transparent !important;
+        transition: background 0.13s, border-color 0.13s !important;
+        cursor: pointer;
+        margin: 0 !important;
+    }
+    div[data-testid="stRadio"] label:hover {
+        background: rgba(59, 110, 248, 0.08) !important;
+        border-color: rgba(59, 110, 248, 0.14) !important;
+    }
+    div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {
+        background: rgba(59, 110, 248, 0.14) !important;
+        border-color: rgba(59, 110, 248, 0.28) !important;
+    }
+    div[data-testid="stRadio"] label p {
+        font-size: 1.10rem !important;
+        font-weight: 600 !important;
+        color: #8ab4f8 !important;
+        margin: 0 !important;
+    }
+    /* 隱藏原生 radio 圓點（相容新舊版 Streamlit） */
+    div[data-testid="stRadio"] [data-baseweb="radio"] div[class*="indicator"],
+    div[data-testid="stRadio"] [data-baseweb="radio"] > div:first-child > div {
+        display: none !important;
+    }
+
+    /* Sidebar header 標籤去掉多餘底線 */
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        font-size: 0.78rem !important;
+        font-weight: 700 !important;
+        color: #3a5580 !important;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+        margin: 0.9rem 0 0.3rem 0.1rem !important;
+        border: none !important;
+        padding: 0 !important;
+    }
+
+    /* ══════════════════════════════════════════
+       METRIC CARDS（st.metric）
+    ══════════════════════════════════════════ */
+    div[data-testid="stMetric"] {
+        background: rgba(255, 255, 255, 0.025);
+        border: 1px solid rgba(100, 140, 220, 0.13);
+        border-radius: 14px;
+        padding: 12px 16px;
+        transition: border-color 0.2s;
+    }
+    div[data-testid="stMetric"]:hover {
+        border-color: rgba(100, 140, 220, 0.26);
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-size: 0.78rem !important;
+        font-weight: 700 !important;
+        color: #4a6890 !important;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.75rem !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        color: #d8ecff !important;
+    }
+    div[data-testid="stMetricDelta"] {
+        font-size: 0.80rem !important;
+        font-weight: 600 !important;
+    }
+    /* delta 顏色調整（Streamlit 預設太亮） */
+    div[data-testid="stMetricDelta"] svg { display: none !important; }
+    @media (max-width: 900px) {
+        div[data-testid="stMetric"] { padding: 10px 12px; }
+        div[data-testid="stMetricLabel"] p { font-size: 0.72rem !important; }
+        div[data-testid="stMetricValue"] { font-size: 1.35rem !important; }
+    }
+
+    /* ══════════════════════════════════════════
+       BUTTONS（st.button）
+    ══════════════════════════════════════════ */
+    div[data-testid="stButton"] > button {
+        background: rgba(59, 110, 248, 0.10) !important;
+        border: 1px solid rgba(59, 110, 248, 0.28) !important;
+        border-radius: 10px !important;
+        color: #7eb5ff !important;
+        font-weight: 600 !important;
+        font-size: 0.88rem !important;
+        transition: background 0.15s, border-color 0.15s, transform 0.1s !important;
+        padding: 0.45rem 1rem !important;
+    }
+    div[data-testid="stButton"] > button:hover {
+        background: rgba(59, 110, 248, 0.20) !important;
+        border-color: rgba(59, 110, 248, 0.50) !important;
+        transform: translateY(-1px) !important;
+    }
+    div[data-testid="stButton"] > button:active {
+        transform: translateY(0) !important;
+    }
+    /* Primary 按鈕（use_container_width）稍微深一點 */
+    div[data-testid="stButton"] > button[kind="primary"] {
+        background: rgba(59, 110, 248, 0.22) !important;
+        border-color: rgba(59, 110, 248, 0.50) !important;
+        color: #b0d0ff !important;
+    }
+
+    /* ══════════════════════════════════════════
+       INPUT / SELECT / TOGGLE
+    ══════════════════════════════════════════ */
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stSelectbox"] > div > div,
+    div[data-testid="stNumberInput"] input {
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(100, 140, 220, 0.18) !important;
+        border-radius: 10px !important;
+        color: #c8dcf8 !important;
+        font-size: 0.92rem !important;
+    }
+    div[data-testid="stTextInput"] input:focus,
+    div[data-testid="stNumberInput"] input:focus {
+        border-color: rgba(59, 110, 248, 0.55) !important;
+        box-shadow: 0 0 0 3px rgba(59, 110, 248, 0.10) !important;
+    }
+    div[data-testid="stToggle"] label span { font-size: 0.88rem !important; }
+
+    /* ══════════════════════════════════════════
+       TABS（st.tabs）
+    ══════════════════════════════════════════ */
+    .stTabs [data-baseweb="tab-list"] {
+        background: transparent !important;
+        border-bottom: 1px solid rgba(100, 140, 220, 0.14) !important;
+        gap: 4px;
+    }
+    .stTabs [data-baseweb="tab-list"] button {
+        background: transparent !important;
+        border: none !important;
+        border-radius: 8px 8px 0 0 !important;
+        color: #4a6890 !important;
+        font-size: 0.88rem !important;
+        font-weight: 600 !important;
+        padding: 0.55rem 1rem !important;
+        transition: color 0.15s, background 0.15s !important;
+    }
+    .stTabs [data-baseweb="tab-list"] button:hover {
+        color: #8ab4f8 !important;
+        background: rgba(59, 110, 248, 0.07) !important;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #7eb5ff !important;
+        border-bottom: 2px solid #3b6ef8 !important;
+        background: rgba(59, 110, 248, 0.08) !important;
+    }
+    @media (max-width: 900px) {
+        .stTabs [data-baseweb="tab-list"] button {
+            padding: 0.45rem 0.65rem !important;
+            font-size: 0.80rem !important;
+        }
+    }
+
+    /* ══════════════════════════════════════════
+       DATAFRAME / TABLE
+    ══════════════════════════════════════════ */
+    .stDataFrame, div[data-testid="stDataFrame"] {
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid rgba(100, 140, 220, 0.12) !important;
+    }
+
+    /* ══════════════════════════════════════════
+       EXPANDER
+    ══════════════════════════════════════════ */
+    div[data-testid="stExpander"] {
+        border: 1px solid rgba(100, 140, 220, 0.13) !important;
+        border-radius: 12px !important;
+        background: rgba(255, 255, 255, 0.018) !important;
+        margin-bottom: 0.55rem;
+    }
+    div[data-testid="stExpander"] summary {
+        font-weight: 600 !important;
+        font-size: 0.90rem !important;
+        color: #8ab4f8 !important;
+        padding: 0.65rem 0.9rem !important;
+    }
+    div[data-testid="stExpander"] summary:hover {
+        background: rgba(59, 110, 248, 0.06) !important;
+        border-radius: 12px;
+    }
+
+    /* ══════════════════════════════════════════
+       INFO / WARNING / SUCCESS / ERROR boxes
+    ══════════════════════════════════════════ */
+    div[data-testid="stInfo"] {
+        background: rgba(59, 110, 248, 0.07) !important;
+        border: 1px solid rgba(59, 110, 248, 0.20) !important;
+        border-radius: 12px !important;
+        font-size: 0.88rem !important;
+    }
+    div[data-testid="stWarning"] {
+        background: rgba(251, 191, 36, 0.07) !important;
+        border: 1px solid rgba(251, 191, 36, 0.22) !important;
+        border-radius: 12px !important;
+        font-size: 0.88rem !important;
+    }
+    div[data-testid="stSuccess"] {
+        background: rgba(34, 197, 94, 0.07) !important;
+        border: 1px solid rgba(34, 197, 94, 0.22) !important;
+        border-radius: 12px !important;
+        font-size: 0.88rem !important;
+    }
+    div[data-testid="stError"] {
+        background: rgba(239, 68, 68, 0.07) !important;
+        border: 1px solid rgba(239, 68, 68, 0.22) !important;
+        border-radius: 12px !important;
+        font-size: 0.88rem !important;
+    }
+
+    /* ══════════════════════════════════════════
+       HEADINGS
+    ══════════════════════════════════════════ */
+    h1 { font-size: 2.00rem !important; font-weight: 800 !important; color: #d8ecff !important; margin-top: 0.2rem !important; }
+    h2 { font-size: 1.70rem !important; font-weight: 700 !important; color: #c0d8f8 !important; }
+    h3 { font-size: 1.50rem !important; font-weight: 700 !important; color: #b0ccf0 !important; }
+    h4 { font-size: 1.35rem !important; font-weight: 700 !important; color: #8ab4f8 !important; }
+
+    /* 明確覆蓋 Streamlit markdown 容器內的標題（優先度高於 Streamlit 預設） */
+    div[data-testid="stMarkdownContainer"] h2,
+    div[data-testid="stMarkdownContainer"] h3 {
+        font-size: 1.50rem !important;
+        font-weight: 700 !important;
+        color: #b0ccf0 !important;
+        margin-top: 0.6rem !important;
+        margin-bottom: 0.3rem !important;
+    }
+    div[data-testid="stMarkdownContainer"] h4 {
+        font-size: 1.35rem !important;
+        font-weight: 700 !important;
+        color: #8ab4f8 !important;
+        margin-top: 0.5rem !important;
+        margin-bottom: 0.25rem !important;
+    }
+
+    @media (max-width: 900px) {
+        h1 { font-size: 1.60rem !important; }
+        h2, h3,
+        div[data-testid="stMarkdownContainer"] h2,
+        div[data-testid="stMarkdownContainer"] h3 { font-size: 1.35rem !important; }
+        h4,
+        div[data-testid="stMarkdownContainer"] h4 { font-size: 1.20rem !important; }
+    }
+
+    /* ══════════════════════════════════════════
+       CUSTOM COMPONENT CARDS（既有 classes 保留升級）
+    ══════════════════════════════════════════ */
+    .main-shell {
+        border: 1px solid rgba(59, 110, 248, 0.16);
+        background: rgba(10, 20, 45, 0.72);
         border-radius: 16px;
+        padding: 0.85rem 1rem 0.6rem;
+        margin-bottom: 0.9rem;
+    }
+    .main-shell h3 { margin-bottom: 0.15rem; }
+    .main-shell p { color: #8090a8; margin-bottom: 0; font-size: 0.88rem; }
+
+    .nav-card {
+        border: 1px solid rgba(59, 110, 248, 0.14);
+        background: rgba(59, 110, 248, 0.055);
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    .nav-title {
+        font-size: 0.70rem;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+        color: #3b6ef8;
+        margin-bottom: 0.3rem;
+        font-weight: 700;
+    }
+
+    /* 比較矩陣 */
+    .compare-matrix {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.35rem 0 0.9rem 0;
+        font-size: 0.88rem;
+        overflow: hidden;
+        border-radius: 12px;
+        border: 1px solid rgba(100, 140, 220, 0.16);
+    }
+    .compare-matrix th, .compare-matrix td {
+        padding: 0.55rem 0.7rem;
+        border-bottom: 1px solid rgba(100, 140, 220, 0.10);
+        text-align: left;
+        vertical-align: top;
+    }
+    .compare-matrix th {
+        background: rgba(59, 110, 248, 0.06);
+        font-weight: 700;
+        font-size: 0.80rem;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        color: #4a6890;
+    }
+    .compare-matrix tr:last-child td { border-bottom: none; }
+
+    /* chips */
+    .compare-chip-wrap { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.2rem 0 0.8rem; }
+    .compare-chip {
+        border: 1px solid rgba(100, 140, 220, 0.18);
+        border-radius: 99px;
+        padding: 0.28rem 0.65rem;
+        font-size: 0.78rem;
+        background: rgba(59, 110, 248, 0.06);
+        color: #8ab4f8;
+    }
+
+    /* rank chip */
+    .rank-chip {
+        display: inline-block;
+        padding: 0.18rem 0.42rem;
+        border-radius: 99px;
+        font-size: 0.72rem;
+        margin-right: 0.3rem;
+        background: rgba(59, 110, 248, 0.10);
+        border: 1px solid rgba(59, 110, 248, 0.20);
+        color: #93c5fd;
+    }
+    .status-chip {
+        display: inline-block;
+        padding: 0.16rem 0.48rem;
+        border-radius: 99px;
+        font-size: 0.72rem;
+        margin-right: 0.3rem;
+        margin-top: 0.22rem;
+        background: rgba(59, 110, 248, 0.10);
+        border: 1px solid rgba(59, 110, 248, 0.20);
+        color: #93c5fd;
+    }
+    .compact-note { font-size: 0.82rem; color: #8090a8; }
+    .compact-toolbar-note { font-size: 0.78rem; color: #6080a0; margin-top: 0.3rem; }
+
+    /* soft-status */
+    .soft-status {
+        border: 1px solid rgba(100, 140, 220, 0.16);
+        background: rgba(255,255,255,0.02);
+        border-radius: 14px;
+        padding: 0.8rem 0.95rem;
+        margin: 0.4rem 0 0.85rem;
+    }
+    .soft-status-title { font-size: 1.20rem; font-weight: 800; color: #d8ecff; margin-bottom: 0.3rem; }
+    .soft-status-note  { font-size: 0.82rem; color: #8090a8; line-height: 1.65; }
+
+    /* section divider */
+    .section-divider-card {
+        border: 1px solid rgba(100, 140, 220, 0.14);
+        background: rgba(5, 10, 25, 0.55);
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
+        margin: 0.3rem 0 0.85rem;
+    }
+    .section-divider-title { font-size: 1.20rem; font-weight: 800; color: #d8ecff; margin-bottom: 0.25rem; }
+    .section-divider-note  { font-size: 0.82rem; color: #8090a8; line-height: 1.7; }
+
+    /* dashboard card */
+    .dashboard-card {
+        border: 1px solid rgba(100, 140, 220, 0.14);
+        background: rgba(255,255,255,0.022);
+        border-radius: 14px;
         padding: 0.8rem 0.9rem;
-        min-height: 124px;
+        min-height: 120px;
     }
-    .dashboard-card h4 {
-        margin: 0 0 0.3rem 0;
-        font-size: 0.98rem;
+    .dashboard-card h4 { margin: 0 0 0.25rem; font-size: 0.95rem; }
+    .dashboard-sub { color: #5a7898; font-size: 0.78rem; margin-bottom: 0.45rem; }
+
+    /* mini-batch */
+    .mini-batch-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin: 0.2rem 0 0.55rem;
     }
-    .dashboard-sub {
-        color: #94a3b8;
-        font-size: 0.8rem;
-        margin-bottom: 0.5rem;
+    .mini-batch-card {
+        border: 1px solid rgba(100, 140, 220, 0.14);
+        background: rgba(10, 20, 45, 0.65);
+        border-radius: 14px;
+        padding: 0.8rem 0.9rem;
+        min-height: 88px;
     }
+    .mini-batch-label { color: #5b9aff; font-size: 0.74rem; margin-bottom: 0.3rem; letter-spacing:.03em; font-weight:700; }
+    .mini-batch-value { color: #d8ecff; font-size: 1.12rem; font-weight: 800; line-height: 1.25; word-break: break-word; }
+    .mini-batch-sub   { color: #8090a8; font-size: 0.78rem; margin-top: 0.3rem; line-height: 1.5; }
+
+    /* diff-top */
+    .diff-top-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin: 0.3rem 0 0.8rem;
+    }
+    .diff-top-card {
+        border: 1px solid rgba(100, 140, 220, 0.14);
+        background: rgba(10, 20, 45, 0.68);
+        border-radius: 14px;
+        padding: 0.8rem 0.9rem;
+        min-height: 112px;
+    }
+    .diff-top-rank  { color: #5b9aff; font-size: 0.73rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .diff-top-title { color: #d8ecff; font-size: 0.96rem; font-weight: 800; line-height: 1.3; }
+    .diff-top-main  { color: #93c5fd; font-size: 1.28rem; font-weight: 800; margin-top: 0.28rem; }
+    .diff-top-sub   { color: #8090a8; font-size: 0.78rem; margin-top: 0.3rem; line-height: 1.5; }
+    @media (max-width: 900px) {
+        .mini-batch-grid, .diff-top-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ══════════════════════════════════════════
+       LANDING PAGE
+    ══════════════════════════════════════════ */
     .lp-hero {
         text-align: center;
-        padding: 3.8rem 1.2rem 2.2rem;
-        background: radial-gradient(ellipse at 50% 0%, rgba(59,130,246,0.18) 0%, rgba(139,92,246,0.08) 40%, rgba(15,23,42,0) 70%);
-        border-radius: 28px;
+        padding: 3.5rem 1.2rem 2rem;
+        background: radial-gradient(ellipse at 50% 0%, rgba(59,110,248,0.16) 0%, rgba(120,80,240,0.07) 45%, transparent 70%);
+        border-radius: 24px;
         margin-bottom: 1rem;
         position: relative;
         overflow: hidden;
@@ -259,460 +657,178 @@ def inject_responsive_css():
     .lp-hero::before {
         content: "";
         position: absolute;
-        top: -1px; left: -1px; right: -1px; bottom: -1px;
-        border-radius: 28px;
-        background: linear-gradient(135deg, rgba(96,165,250,0.25), rgba(139,92,246,0.15), rgba(244,114,182,0.1), transparent 60%);
-        z-index: 0;
-        pointer-events: none;
-        mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-        mask-composite: exclude;
-        -webkit-mask-composite: xor;
+        inset: 0;
+        border-radius: 24px;
         padding: 1px;
+        background: linear-gradient(135deg, rgba(59,110,248,0.22), rgba(120,80,240,0.12), transparent 55%);
+        -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor; mask-composite: exclude;
+        pointer-events: none;
     }
     .lp-hero h1 {
-        font-size: 2.4rem !important;
+        font-size: 2.2rem !important;
         font-weight: 900;
-        background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 40%, #f472b6 80%, #fb923c 100%);
+        background: linear-gradient(135deg, #5b9aff 0%, #a78bfa 45%, #f472b6 80%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.45rem;
         line-height: 1.15;
-        position: relative;
-        z-index: 1;
-    }
-    .lp-hero .lp-sub {
-        font-size: 1.05rem;
-        color: #cbd5e1;
-        margin-bottom: 0.6rem;
-        font-weight: 500;
         position: relative; z-index: 1;
     }
-    .lp-hero .lp-tags {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 0.4rem;
-        margin-bottom: 1.6rem;
-        position: relative; z-index: 1;
-    }
+    .lp-hero .lp-sub { font-size: 1rem; color: #8090a8; margin-bottom: 0.55rem; font-weight: 500; position: relative; z-index: 1; }
+    .lp-hero .lp-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.35rem; margin-bottom: 1.5rem; position: relative; z-index: 1; }
     .lp-tag {
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(148,163,184,0.18);
-        border-radius: 999px;
-        padding: 0.28rem 0.75rem;
-        font-size: 0.75rem;
-        color: #94a3b8;
-        letter-spacing: 0.02em;
+        background: rgba(59,110,248,0.08);
+        border: 1px solid rgba(59,110,248,0.18);
+        border-radius: 99px;
+        padding: 0.24rem 0.7rem;
+        font-size: 0.72rem;
+        color: #6090c8;
+        letter-spacing: .02em;
     }
-    .lp-section {
-        margin-bottom: 2.5rem;
-    }
-    .lp-section-title {
-        font-size: 1.1rem;
-        font-weight: 800;
-        color: #e2e8f0;
-        margin-bottom: 1rem;
-        padding-left: 0.15rem;
-        letter-spacing: 0.02em;
-    }
+    .lp-section { margin-bottom: 2.2rem; }
+    .lp-section-title { font-size: 1.40rem; font-weight: 800; color: #c0d8f8; margin-bottom: 0.85rem; padding-left: 0.1rem; }
     .lp-card {
-        border: 1px solid rgba(148,163,184,0.12);
-        background: linear-gradient(160deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.01) 100%);
-        border-radius: 20px;
-        padding: 1.5rem 1.3rem;
-        margin-bottom: 0.75rem;
-        transition: all 0.25s ease;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-        position: relative;
-        overflow: hidden;
+        border: 1px solid rgba(100,140,220,0.12);
+        background: rgba(255,255,255,0.03);
+        border-radius: 18px;
+        padding: 1.3rem 1.2rem;
+        margin-bottom: 0.65rem;
+        transition: border-color 0.2s, transform 0.2s;
+        position: relative; overflow: hidden;
     }
     .lp-card::after {
-        content: "";
-        position: absolute;
-        top: 0; left: 0;
-        width: 4px; height: 100%;
-        border-radius: 20px 0 0 20px;
+        content: ""; position: absolute;
+        top: 0; left: 0; width: 3px; height: 100%;
+        border-radius: 18px 0 0 18px;
     }
-    .lp-card:nth-child(1)::after { background: linear-gradient(180deg, #3b82f6, #60a5fa); }
-    .lp-card:nth-child(2)::after { background: linear-gradient(180deg, #8b5cf6, #a78bfa); }
-    .lp-card:nth-child(3)::after { background: linear-gradient(180deg, #f59e0b, #fbbf24); }
-    .lp-card:nth-child(4)::after { background: linear-gradient(180deg, #10b981, #34d399); }
-    .lp-card:hover {
-        border-color: rgba(96,165,250,0.35);
-        box-shadow: 0 4px 24px rgba(59,130,246,0.12);
-        transform: translateY(-1px);
-    }
+    .lp-card:nth-child(1)::after { background: linear-gradient(180deg,#3b6ef8,#5b9aff); }
+    .lp-card:nth-child(2)::after { background: linear-gradient(180deg,#7c3aed,#a78bfa); }
+    .lp-card:nth-child(3)::after { background: linear-gradient(180deg,#f59e0b,#fbbf24); }
+    .lp-card:nth-child(4)::after { background: linear-gradient(180deg,#10b981,#34d399); }
+    .lp-card:hover { border-color: rgba(59,110,248,0.30); transform: translateY(-1px); }
     .lp-card { cursor: default; }
-    .lp-card-icon { font-size: 1.6rem; margin-bottom: 0.55rem; }
-    .lp-card-title { font-size: 1.02rem; font-weight: 700; color: #f1f5f9; margin-bottom: 0.35rem; }
-    .lp-card-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.55; }
-    .lp-card-arrow {
-        position: absolute;
-        right: 1.1rem; top: 50%;
-        transform: translateY(-50%);
-        font-size: 1.1rem;
-        color: #475569;
-        transition: all 0.2s;
-    }
-    .lp-card:hover .lp-card-arrow { color: #60a5fa; transform: translateY(-50%) translateX(3px); }
+    .lp-card-icon { font-size: 1.8rem; margin-bottom: 0.45rem; }
+    .lp-card-title { font-size: 1.20rem; font-weight: 700; color: #c8dcf8; margin-bottom: 0.28rem; }
+    .lp-card-desc  { font-size: 0.92rem; color: #5a7898; line-height: 1.55; }
+    .lp-card-arrow { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); font-size: 1rem; color: #2a4060; transition: all 0.18s; }
+    .lp-card:hover .lp-card-arrow { color: #5b9aff; transform: translateY(-50%) translateX(3px); }
+
     .lp-news-item {
-        border: 1px solid rgba(148,163,184,0.1);
-        background: rgba(255,255,255,0.025);
-        border-radius: 14px;
-        padding: 0.9rem 1rem;
-        margin-bottom: 0.55rem;
-        transition: border-color 0.2s;
+        border: 1px solid rgba(100,140,220,0.10);
+        background: rgba(255,255,255,0.02);
+        border-radius: 12px;
+        padding: 0.85rem 0.95rem;
+        margin-bottom: 0.5rem;
+        transition: border-color 0.18s;
     }
-    .lp-news-item:hover { border-color: rgba(96,165,250,0.3); }
-    .lp-news-meta {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        margin-bottom: 0.35rem;
-        flex-wrap: wrap;
-    }
-    .lp-news-time { font-size: 0.72rem; color: #64748b; }
-    .lp-news-badge {
-        font-size: 0.68rem;
-        padding: 0.15rem 0.45rem;
-        border-radius: 999px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-    }
-    .lp-news-badge.bull { background: rgba(34,197,94,0.15); color: #4ade80; }
-    .lp-news-badge.bear { background: rgba(239,68,68,0.15); color: #f87171; }
-    .lp-news-badge.neutral { background: rgba(251,191,36,0.12); color: #fbbf24; }
-    .lp-news-title { font-size: 0.88rem; color: #e2e8f0; font-weight: 500; line-height: 1.45; }
-    .lp-news-source { font-size: 0.7rem; color: #64748b; margin-top: 0.2rem; }
-    .lp-state-card {
-        border: 1px solid rgba(148,163,184,0.1);
-        border-radius: 18px;
-        padding: 1.6rem 1.3rem;
-        text-align: center;
-    }
-    .lp-state-card.empty { background: rgba(255,255,255,0.02); }
-    .lp-state-card.error { background: rgba(239,68,68,0.04); border-color: rgba(239,68,68,0.15); }
-    .lp-state-icon { font-size: 1.8rem; margin-bottom: 0.6rem; }
-    .lp-state-title { font-size: 1rem; font-weight: 700; color: #e2e8f0; margin-bottom: 0.35rem; }
-    .lp-state-desc { font-size: 0.82rem; color: #94a3b8; line-height: 1.5; }
-    .lp-steps-compact {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.6rem;
-    }
+    .lp-news-item:hover { border-color: rgba(59,110,248,0.26); }
+    .lp-news-meta { display: flex; align-items: center; gap: 0.45rem; margin-bottom: 0.3rem; flex-wrap: wrap; }
+    .lp-news-time { font-size: 0.70rem; color: #3a5570; }
+    .lp-news-badge { font-size: 0.66rem; padding: 0.13rem 0.42rem; border-radius: 99px; font-weight: 700; }
+    .lp-news-badge.bull   { background: rgba(34,197,94,0.12);  color: #4ade80; }
+    .lp-news-badge.bear   { background: rgba(239,68,68,0.12);   color: #f87171; }
+    .lp-news-badge.neutral{ background: rgba(251,191,36,0.10);  color: #fbbf24; }
+    .lp-news-title  { font-size: 0.86rem; color: #c0d8f8; font-weight: 500; line-height: 1.45; }
+    .lp-news-source { font-size: 0.68rem; color: #3a5570; margin-top: 0.18rem; }
+
+    .lp-state-card { border: 1px solid rgba(100,140,220,0.10); border-radius: 16px; padding: 1.5rem 1.2rem; text-align: center; }
+    .lp-state-card.empty { background: rgba(255,255,255,0.018); }
+    .lp-state-card.error { background: rgba(239,68,68,0.04); border-color: rgba(239,68,68,0.14); }
+    .lp-state-icon  { font-size: 1.6rem; margin-bottom: 0.5rem; }
+    .lp-state-title { font-size: 0.96rem; font-weight: 700; color: #c0d8f8; margin-bottom: 0.3rem; }
+    .lp-state-desc  { font-size: 0.80rem; color: #5a7898; line-height: 1.5; }
+
+    .lp-steps-compact { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
     .lp-step-compact {
-        border: 1px solid rgba(148,163,184,0.08);
-        border-radius: 14px;
-        padding: 0.75rem 0.85rem;
-        background: rgba(255,255,255,0.015);
+        border: 1px solid rgba(100,140,220,0.09);
+        border-radius: 12px;
+        padding: 0.7rem 0.8rem;
+        background: rgba(255,255,255,0.014);
     }
     .lp-step-compact-num {
-        display: inline-block;
-        width: 22px; height: 22px;
+        display: inline-block; width: 20px; height: 20px;
         border-radius: 50%;
-        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-        text-align: center;
-        line-height: 22px;
-        font-size: 0.72rem;
-        font-weight: 800;
-        color: white;
-        margin-right: 0.4rem;
+        background: linear-gradient(135deg,#3b6ef8,#7c3aed);
+        text-align: center; line-height: 20px;
+        font-size: 0.68rem; font-weight: 800; color: white;
+        margin-right: 0.35rem;
     }
-    .lp-step-compact-title { font-size: 0.85rem; font-weight: 600; color: #e2e8f0; display: inline; }
-    .lp-step-compact-desc { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; line-height: 1.4; }
+    .lp-step-compact-title { font-size: 1.05rem; font-weight: 600; color: #c0d8f8; display: inline; }
+    .lp-step-compact-desc  { font-size: 0.73rem; color: #5a7898; margin-top: 0.22rem; line-height: 1.4; }
+
     .lp-strategy-panel {
-        border: 1px solid rgba(148,163,184,0.12);
-        background: linear-gradient(160deg, rgba(15,23,42,0.92) 0%, rgba(30,41,59,0.72) 100%);
-        border-radius: 22px;
-        padding: 1.5rem 1.2rem 1.2rem;
-        box-shadow: 0 4px 24px rgba(0,0,0,0.22);
+        border: 1px solid rgba(100,140,220,0.13);
+        background: rgba(8,18,40,0.85);
+        border-radius: 20px;
+        padding: 1.3rem 1.1rem 1.1rem;
     }
-    .lp-strategy-header {
-        font-size: 0.72rem;
-        color: #64748b;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        margin-bottom: 0.2rem;
-        font-weight: 600;
-    }
+    .lp-strategy-header { font-size: 0.68rem; color: #3a5570; text-transform: uppercase; letter-spacing:.12em; margin-bottom:0.18rem; font-weight:700; }
     .lp-strategy-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0.85rem 0.6rem;
-        border-bottom: 1px solid rgba(148,163,184,0.07);
-        border-radius: 10px;
-        margin: 0 -0.3rem;
-        transition: background 0.15s;
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 0.75rem 0.5rem;
+        border-bottom: 1px solid rgba(100,140,220,0.07);
+        border-radius: 9px; margin: 0 -0.25rem;
+        transition: background 0.13s;
     }
-    .lp-strategy-row:hover { background: rgba(255,255,255,0.02); }
-    .lp-strategy-label {
-        font-size: 0.92rem;
-        color: #cbd5e1;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    .lp-strategy-label .lp-dot {
-        width: 6px; height: 6px;
-        border-radius: 50%;
-        background: #475569;
-        flex-shrink: 0;
-    }
-    .lp-strategy-value {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #f1f5f9;
-        letter-spacing: -0.01em;
-    }
-    .lp-score-cards {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.7rem;
-        margin-top: 0.6rem;
-    }
+    .lp-strategy-row:hover { background: rgba(255,255,255,0.018); }
+    .lp-strategy-label { font-size: 0.88rem; color: #8090a8; font-weight: 600; display: flex; align-items: center; gap: 0.45rem; }
+    .lp-strategy-label .lp-dot { width: 5px; height: 5px; border-radius: 50%; background: #2a4060; flex-shrink: 0; }
+    .lp-strategy-value { font-size: 1.05rem; font-weight: 700; color: #d8ecff; }
+
+    .lp-score-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; margin-top: 0.55rem; }
     .lp-score-card {
-        border: 1px solid rgba(148,163,184,0.1);
-        border-radius: 16px;
-        padding: 1.1rem 0.9rem 0.9rem;
-        text-align: center;
-        position: relative;
-        overflow: hidden;
+        border: 1px solid rgba(100,140,220,0.10);
+        border-radius: 14px;
+        padding: 1rem 0.85rem 0.85rem;
+        text-align: center; position: relative; overflow: hidden;
     }
-    .lp-score-card::before {
-        content: "";
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 3px;
-    }
-    .lp-score-card.long { background: rgba(34,197,94,0.06); }
-    .lp-score-card.long::before { background: linear-gradient(90deg, #22c55e, #4ade80); }
-    .lp-score-card.short { background: rgba(239,68,68,0.06); }
-    .lp-score-card.short::before { background: linear-gradient(90deg, #ef4444, #f87171); }
-    .lp-score-card-label {
-        font-size: 0.76rem;
-        color: #94a3b8;
-        font-weight: 600;
-        letter-spacing: 0.03em;
-        margin-bottom: 0.4rem;
-    }
-    .lp-score-card-value {
-        font-size: 2rem;
-        font-weight: 800;
-        line-height: 1.1;
-        margin-bottom: 0.5rem;
-    }
-    .lp-score-card.long .lp-score-card-value { color: #4ade80; }
+    .lp-score-card::before { content:""; position:absolute; top:0; left:0; right:0; height:2px; }
+    .lp-score-card.long  { background: rgba(34,197,94,0.05); }
+    .lp-score-card.long::before  { background: linear-gradient(90deg,#22c55e,#4ade80); }
+    .lp-score-card.short { background: rgba(239,68,68,0.05); }
+    .lp-score-card.short::before { background: linear-gradient(90deg,#ef4444,#f87171); }
+    .lp-score-card-label { font-size: 0.72rem; color: #5a7898; font-weight: 700; letter-spacing:.03em; margin-bottom:0.35rem; }
+    .lp-score-card-value { font-size: 1.85rem; font-weight: 800; line-height:1.1; margin-bottom:0.45rem; }
+    .lp-score-card.long .lp-score-card-value  { color: #4ade80; }
     .lp-score-card.short .lp-score-card-value { color: #f87171; }
-    .lp-score-mini-bar {
-        height: 5px;
-        background: rgba(255,255,255,0.06);
-        border-radius: 3px;
-        overflow: hidden;
-    }
-    .lp-score-mini-fill {
-        height: 100%;
-        border-radius: 3px;
-        transition: width 0.6s ease;
-    }
-    .lp-score-card.long .lp-score-mini-fill { background: linear-gradient(90deg, #22c55e, #4ade80); }
-    .lp-score-card.short .lp-score-mini-fill { background: linear-gradient(90deg, #ef4444, #f87171); }
+    .lp-score-mini-bar  { height: 4px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
+    .lp-score-mini-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+    .lp-score-card.long .lp-score-mini-fill  { background: linear-gradient(90deg,#22c55e,#4ade80); }
+    .lp-score-card.short .lp-score-mini-fill { background: linear-gradient(90deg,#ef4444,#f87171); }
+
     .lp-insight {
-        margin-top: 0.9rem;
-        padding: 0.85rem 1rem;
-        background: rgba(59,130,246,0.07);
-        border-left: 3px solid #3b82f6;
-        border-radius: 0 14px 14px 0;
-        font-size: 0.84rem;
-        color: #cbd5e1;
-        line-height: 1.55;
+        margin-top: 0.85rem; padding: 0.8rem 0.95rem;
+        background: rgba(59,110,248,0.06);
+        border-left: 2px solid #3b6ef8;
+        border-radius: 0 12px 12px 0;
+        font-size: 0.82rem; color: #8090a8; line-height: 1.55;
     }
     .lp-stat-card {
-        border: 1px solid rgba(148,163,184,0.12);
-        background: linear-gradient(160deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.01) 100%);
-        border-radius: 18px;
-        padding: 1.3rem 1rem;
-        text-align: center;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.12);
-    }
-    .lp-stat-value { font-size: 1.7rem; font-weight: 800; color: #f8fafc; }
-    .lp-stat-label { font-size: 0.76rem; color: #64748b; margin-top: 0.25rem; letter-spacing: 0.04em; }
-    .lp-step {
-        display: flex;
-        align-items: flex-start;
-        gap: 1rem;
-        margin-bottom: 1.3rem;
-    }
-    .lp-step-num {
-        width: 38px; height: 38px;
-        border-radius: 50%;
-        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-        display: flex; align-items: center; justify-content: center;
-        font-weight: 800; font-size: 0.95rem; color: white;
-        flex-shrink: 0;
-        box-shadow: 0 2px 10px rgba(59,130,246,0.3);
-    }
-    .lp-step-text h4 { margin: 0.1rem 0 0.25rem 0; font-size: 0.98rem; color: #e2e8f0; }
-    .lp-step-text p { margin: 0; font-size: 0.82rem; color: #94a3b8; line-height: 1.5; }
-    .lp-divider {
-        height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(148,163,184,0.18), transparent);
-        margin: 2.2rem 0;
-    }
-    .lp-footer {
-        text-align: center;
-        padding: 1.5rem 0 2.5rem;
-        color: #475569;
-        font-size: 0.78rem;
-        letter-spacing: 0.02em;
-    }
-    @media (max-width: 900px) {
-        .lp-hero { padding: 2.8rem 0.8rem 1.8rem; }
-        .lp-hero h1 { font-size: 1.85rem !important; }
-        .lp-strategy-panel { padding: 1.2rem 1rem; }
-    }
-    .rank-chip {
-        display: inline-block;
-        padding: 0.2rem 0.45rem;
-        border-radius: 999px;
-        font-size: 0.74rem;
-        margin-right: 0.35rem;
-        background: rgba(96,165,250,0.12);
-        border: 1px solid rgba(96,165,250,0.18);
-        color: #bfdbfe;
-    }
-    .compact-note {
-        font-size: 0.83rem;
-        color: #cbd5e1;
-    }
-    .soft-status {
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        border: 1px solid rgba(100,140,220,0.12);
         background: rgba(255,255,255,0.025);
-        border-radius: 16px;
-        padding: 0.85rem 0.95rem;
-        margin: 0.45rem 0 0.9rem 0;
+        border-radius: 16px; padding: 1.2rem 0.95rem; text-align: center;
     }
-    .soft-status-title {
-        font-size: 0.95rem;
-        font-weight: 800;
-        color: #f8fafc;
-        margin-bottom: 0.35rem;
+    .lp-stat-value { font-size: 1.6rem; font-weight: 800; color: #d8ecff; }
+    .lp-stat-label { font-size: 0.72rem; color: #3a5570; margin-top: 0.22rem; letter-spacing:.04em; }
+    .lp-step { display: flex; align-items: flex-start; gap: 0.9rem; margin-bottom: 1.2rem; }
+    .lp-step-num {
+        width: 34px; height: 34px; border-radius: 50%;
+        background: linear-gradient(135deg,#3b6ef8,#7c3aed);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 800; font-size: 0.88rem; color: white; flex-shrink: 0;
     }
-    .soft-status-note {
-        font-size: 0.84rem;
-        color: #cbd5e1;
-        line-height: 1.65;
-    }
-    .status-chip {
-        display: inline-block;
-        padding: 0.18rem 0.5rem;
-        border-radius: 999px;
-        font-size: 0.74rem;
-        margin-right: 0.35rem;
-        margin-top: 0.25rem;
-        background: rgba(96,165,250,0.12);
-        border: 1px solid rgba(96,165,250,0.18);
-        color: #bfdbfe;
-    }
-    .section-divider-card {
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        background: rgba(2, 6, 23, 0.58);
-        border-radius: 18px;
-        padding: 0.9rem 1rem;
-        margin: 0.35rem 0 0.9rem 0;
-    }
-    .section-divider-title {
-        font-size: 1rem;
-        font-weight: 800;
-        color: #f8fafc;
-        margin-bottom: 0.28rem;
-    }
-    .section-divider-note {
-        font-size: 0.84rem;
-        color: #cbd5e1;
-        line-height: 1.7;
-    }
-    .mini-batch-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.75rem;
-        margin: 0.2rem 0 0.55rem 0;
-    }
-    .mini-batch-card {
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        background: rgba(15, 23, 42, 0.7);
-        border-radius: 16px;
-        padding: 0.85rem 0.95rem;
-        min-height: 92px;
-    }
-    .mini-batch-label {
-        color: #93c5fd;
-        font-size: 0.76rem;
-        margin-bottom: 0.35rem;
-        letter-spacing: .03em;
-        font-weight: 700;
-    }
-    .mini-batch-value {
-        color: #f8fafc;
-        font-size: 1.18rem;
-        font-weight: 800;
-        line-height: 1.25;
-        word-break: break-word;
-    }
-    .mini-batch-sub {
-        color: #cbd5e1;
-        font-size: 0.8rem;
-        margin-top: 0.35rem;
-        line-height: 1.55;
-    }
-    .diff-top-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.75rem;
-        margin: 0.35rem 0 0.85rem 0;
-    }
-    .diff-top-card {
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        background: rgba(15, 23, 42, 0.72);
-        border-radius: 16px;
-        padding: 0.85rem 0.95rem;
-        min-height: 118px;
-    }
-    .diff-top-rank {
-        color: #93c5fd;
-        font-size: 0.75rem;
-        font-weight: 700;
-        margin-bottom: 0.35rem;
-    }
-    .diff-top-title {
-        color: #f8fafc;
-        font-size: 1rem;
-        font-weight: 800;
-        line-height: 1.3;
-    }
-    .diff-top-main {
-        color: #bfdbfe;
-        font-size: 1.35rem;
-        font-weight: 800;
-        margin-top: 0.3rem;
-    }
-    .diff-top-sub {
-        color: #cbd5e1;
-        font-size: 0.8rem;
-        margin-top: 0.35rem;
-        line-height: 1.55;
-    }
-    .compact-toolbar-note {
-        font-size: 0.8rem;
-        color: #94a3b8;
-        margin-top: 0.35rem;
-    }
+    .lp-step-text h4 { margin: 0.08rem 0 0.2rem; font-size: 0.94rem; color: #c0d8f8; }
+    .lp-step-text p  { margin: 0; font-size: 0.80rem; color: #5a7898; line-height: 1.5; }
+    .lp-divider { height: 1px; background: linear-gradient(90deg,transparent,rgba(100,140,220,0.16),transparent); margin: 2rem 0; }
+    .lp-footer { text-align: center; padding: 1.3rem 0 2.2rem; color: #2a4060; font-size: 0.75rem; }
     @media (max-width: 900px) {
-        .mini-batch-grid, .diff-top-grid {
-            grid-template-columns: 1fr;
-        }
+        .lp-hero { padding: 2.5rem 0.75rem 1.6rem; }
+        .lp-hero h1 { font-size: 1.70rem !important; }
+        .lp-strategy-panel { padding: 1.1rem 0.9rem; }
     }
+
     </style>
     """, unsafe_allow_html=True)
 
@@ -969,7 +1085,7 @@ def _jsonable(value):
             return ""
     except Exception:
         pass
-    if isinstance(value, (datetime,)):
+    if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if hasattr(value, "item"):
         try:
@@ -1010,11 +1126,8 @@ def display_name(code: str, name_map: dict):
 
 
 def html_escape(value):
-    return (str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;"))
+    # 直接使用已 import 的標準庫 html.escape，行為完全一致且更完整
+    return htmllib.escape(str(value), quote=True)
 
 
 def render_compare_matrix(detail_row):
@@ -1127,10 +1240,9 @@ def calc_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9)
 
 
 def indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
     if df is None or df.empty:
         return pd.DataFrame()
+    df = df.copy()
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -1141,54 +1253,36 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = pd.NA
 
-    close_col = df["Close"]
-    if isinstance(close_col, pd.DataFrame):
-        close_col = close_col.iloc[:, 0]
-    close_col = pd.to_numeric(close_col, errors="coerce")
+    def _to_series(col_data):
+        """MultiIndex yfinance 有時會回傳 DataFrame，取第一欄並轉 numeric。"""
+        if isinstance(col_data, pd.DataFrame):
+            col_data = col_data.iloc[:, 0]
+        return pd.to_numeric(col_data, errors="coerce")
 
-    volume_col = df["Volume"]
-    if isinstance(volume_col, pd.DataFrame):
-        volume_col = volume_col.iloc[:, 0]
-    volume_col = pd.to_numeric(volume_col, errors="coerce")
-
-    high_col = df["High"]
-    if isinstance(high_col, pd.DataFrame):
-        high_col = high_col.iloc[:, 0]
-    high_col = pd.to_numeric(high_col, errors="coerce")
-
-    low_col = df["Low"]
-    if isinstance(low_col, pd.DataFrame):
-        low_col = low_col.iloc[:, 0]
-    low_col = pd.to_numeric(low_col, errors="coerce")
-
-    df["Close"] = close_col
-    df["Volume"] = volume_col
-    df["High"] = high_col
-    df["Low"] = low_col
+    df["Close"] = _to_series(df["Close"])
+    df["Volume"] = _to_series(df["Volume"])
+    df["High"] = _to_series(df["High"])
+    df["Low"] = _to_series(df["Low"])
 
     df = df.dropna(subset=["Close", "High", "Low"])
 
     if df.empty:
         return pd.DataFrame()
 
-    close_col = df["Close"]
-    volume_col = df["Volume"]
-    high_col = df["High"]
-    low_col = df["Low"]
-
-    df["ma5"] = close_col.rolling(5).mean()
-    df["ma10"] = close_col.rolling(10).mean()
-    df["ma20"] = close_col.rolling(20).mean()
-    df["ma60"] = close_col.rolling(60).mean()
-    df["ma120"] = close_col.rolling(120).mean()
-    df["vol5"] = volume_col.rolling(5).mean()
-    df["vol20"] = volume_col.rolling(20).mean()
-    df["atr"] = (high_col - low_col).rolling(14).mean()
-    df["rsi"] = calc_rsi(close_col, 14)
-    df["bias5"] = ((close_col - df["ma5"]) / df["ma5"] * 100).fillna(0)
+    # dropna 之後直接從 df 取欄，不需再建中間變數
+    df["ma5"] = df["Close"].rolling(5).mean()
+    df["ma10"] = df["Close"].rolling(10).mean()
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma60"] = df["Close"].rolling(60).mean()
+    df["ma120"] = df["Close"].rolling(120).mean()
+    df["vol5"] = df["Volume"].rolling(5).mean()
+    df["vol20"] = df["Volume"].rolling(20).mean()
+    df["atr"] = (df["High"] - df["Low"]).rolling(14).mean()
+    df["rsi"] = calc_rsi(df["Close"], 14)
+    df["bias5"] = ((df["Close"] - df["ma5"]) / df["ma5"] * 100).fillna(0)
     df["k"], df["d"] = calc_kd(df, 9)
     df["j"] = (3 * df["k"] - 2 * df["d"]).fillna(50)
-    df["macd_dif"], df["macd_dea"], df["macd_bar"] = calc_macd(close_col)
+    df["macd_dif"], df["macd_dea"], df["macd_bar"] = calc_macd(df["Close"])
 
     return df
 def _official_latest_row_for_symbol(symbol: str):
@@ -1320,11 +1414,14 @@ def _patch_today_nan_row(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
 
 def _download_symbol_pipeline(symbol: str) -> pd.DataFrame:
     sym = symbol.strip()
-    df = yf.download(sym, period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
-    if df is not None and not df.empty:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        df = _patch_today_nan_row(sym, df)
+    with _YFIN_DOWNLOAD_LOCK:
+        df = yf.download(sym, period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            df = _patch_today_nan_row(sym, df)
+    if df is None:
+        df = pd.DataFrame()
     df = normalize_df(df)
     return _apply_official_latest_bar(sym, df)
 
@@ -1364,19 +1461,25 @@ def resolve_symbol(raw_input: str, name_map: dict | None = None):
     for sym in candidates:
         try:
             df = download_symbol(sym)
-        except (TimeoutError, OSError, URLError, HTTPError, Exception):
+        except Exception:  # 包含 TimeoutError, OSError, URLError, HTTPError 等
             df = pd.DataFrame()
         if df is not None and not df.empty and len(df) >= 20:
-            return sym, df
+            return sym, df.copy()
     return fallback, pd.DataFrame()
 
 
 def _download_twii_pipeline() -> pd.DataFrame:
-    df = yf.download("^TWII", period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+    with _YFIN_DOWNLOAD_LOCK:
+        df = yf.download("^TWII", period="6mo", interval="1d", auto_adjust=False, progress=False, threads=False)
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    if df is None:
+        return pd.DataFrame()
     return normalize_df(df)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=_MARKET_DATA_CACHE_TTL_SEC, show_spinner=False)
 def get_market_data():
     with ThreadPoolExecutor(max_workers=1) as ex:
         fut = ex.submit(_download_twii_pipeline)
@@ -1419,33 +1522,19 @@ def parse_num(value):
 
 
 def safe_int_or_none(value):
+    # parse_num 已保證回傳值不含 NaN/None，無需再次 isna 檢查
     num = parse_num(value)
     if num is None:
         return None
     try:
-        if pd.isna(num):
-            return None
-    except Exception:
-        pass
-    try:
-        return int(round(float(num)))
+        return int(round(num))
     except Exception:
         return None
 
 
 def safe_float_or_none(value):
-    num = parse_num(value)
-    if num is None:
-        return None
-    try:
-        if pd.isna(num):
-            return None
-    except Exception:
-        pass
-    try:
-        return float(num)
-    except Exception:
-        return None
+    # parse_num 已保證回傳值不含 NaN/None，直接回傳即可
+    return parse_num(value)
 
 
 def _normalize_label(text) -> str:
@@ -1489,46 +1578,192 @@ def _inst_search_value(row: dict, exact_keys=None, contains_patterns=None):
     return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_twse_openapi(endpoint: str):
-    """呼叫 openapi.twse.com.tw/v1 端點，回傳 list of dict。"""
-    url = f"{TWSE_OPENAPI_BASE}/{endpoint.lstrip('/')}"
+def _twse_openapi_debug_store(endpoint: str, debug: dict):
+    """將最近一次 OpenAPI 呼叫偵錯寫入 session（依 endpoint 分開）。"""
+    try:
+        ep = str(endpoint).lstrip("/")
+        root = st.session_state.setdefault("twse_openapi_debug_by_endpoint", {})
+        dbg = {**debug, "stored_at": datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S %Z")}
+        root[ep] = dbg
+        st.session_state["twse_openapi_last_debug"] = {"endpoint": ep, **dbg}
+    except Exception:
+        pass
+
+
+def _is_twse_ssl_verify_failure(exc: BaseException) -> bool:
+    """辨識證交所 OpenAPI 常見的憑證鏈／自簽導致無法 verify 的情況。"""
+    try:
+        import requests as _rq
+        if isinstance(exc, _rq.exceptions.SSLError):
+            return True
+    except Exception:
+        pass
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLError):
+            return True
+        s = str(cur).lower()
+        if "certificate_verify_failed" in s or "self-signed certificate" in s:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _twse_openapi_rows_from_json_text(text: str, debug: dict, via: str) -> list:
+    """解析 OpenAPI JSON body；via 為 'requests' 或 'urllib'（影響 debug 欄位與 final_status）。"""
+    rows: list = []
+    text = (text or "").strip()
+    if not text:
+        if via == "requests":
+            debug["response_empty"] = True
+            debug["requests_error"] = debug.get("requests_error") or "requests 成功但 body 為空"
+            debug["final_status"] = "response_body_empty"
+        else:
+            debug["urllib_error"] = "urllib 成功但 body 為空"
+            if debug["final_status"] == "empty":
+                debug["final_status"] = "urllib_body_empty"
+        return rows
+    if not debug.get("response_text_preview"):
+        debug["response_text_preview"] = text[:480] + ("…" if len(text) > 480 else "")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        if via == "requests":
+            debug["json_error"] = f"JSON 解析失敗（requests 路徑）：{e}"
+            debug["final_status"] = "json_decode_requests"
+        else:
+            err = f"JSON 解析失敗（urllib 路徑）：{e}"
+            debug["urllib_error"] = err
+            if debug.get("json_error") is None:
+                debug["json_error"] = err
+            debug["final_status"] = "json_decode_urllib"
+        return rows
+    if via == "urllib":
+        debug["parsed_top_type_urllib"] = type(data).__name__
+    else:
+        debug["parsed_top_type"] = type(data).__name__
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ["data", "rows", "items", "result", "results"]:
+            val = data.get(key)
+            if isinstance(val, list):
+                rows = val
+                if via == "urllib":
+                    debug["parsed_list_key_urllib"] = key
+                else:
+                    debug["parsed_list_key"] = key
+                break
+        if not rows:
+            rows = [data]
+            if via == "requests":
+                debug["parsed_list_key"] = "(whole_dict_as_single_row)"
+    if rows:
+        debug["rows_count"] = len(rows)
+        debug["final_status"] = "ok_urllib" if via == "urllib" else "ok"
+    else:
+        debug["final_status"] = "parsed_but_no_list" if via == "requests" else "urllib_parsed_no_rows"
+    return rows
+
+
+def _fetch_twse_openapi_impl(endpoint: str) -> tuple[list, dict]:
+    """實際 HTTP／JSON 解析；回傳 (rows, debug_dict)，不寫入 session。"""
+    ep = str(endpoint).lstrip("/")
+    url = f"{TWSE_OPENAPI_BASE}/{ep}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
     }
+    debug = {
+        "endpoint": ep,
+        "url": url,
+        "requests_http_status": None,
+        "requests_error": None,
+        "ssl_verify_relaxed": False,
+        "requests_ssl_verify_error": None,
+        "response_empty": False,
+        "response_text_preview": None,
+        "json_error": None,
+        "parsed_top_type": None,
+        "rows_count": 0,
+        "urllib_error": None,
+        "urllib_ssl_relaxed": False,
+        "final_status": "empty",
+    }
+    rows: list = []
+
     try:
         resp = requests.get(url, headers=headers, timeout=15, verify=True)
-        if resp.ok and resp.text.strip():
-            data = json.loads(resp.text)
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                for key in ["data", "rows", "items", "result", "results"]:
-                    val = data.get(key)
-                    if isinstance(val, list):
-                        return val
-                return [data]
-    except Exception:
-        pass
-    # 備援：urllib
-    try:
+        debug["requests_http_status"] = int(resp.status_code)
+        if not resp.ok:
+            debug["requests_error"] = f"HTTP {resp.status_code}（requests）"
+            debug["final_status"] = "requests_http_not_ok"
+        else:
+            rows = _twse_openapi_rows_from_json_text(resp.text or "", debug, "requests")
+    except Exception as e:
+        if _is_twse_ssl_verify_failure(e):
+            debug["requests_ssl_verify_error"] = f"{type(e).__name__}: {e}"
+            try:
+                resp = requests.get(url, headers=headers, timeout=15, verify=False)
+                debug["ssl_verify_relaxed"] = True
+                debug["requests_http_status"] = int(resp.status_code)
+                debug["requests_error"] = None
+                if not resp.ok:
+                    debug["requests_error"] = f"HTTP {resp.status_code}（requests，verify=False）"
+                    debug["final_status"] = "requests_http_not_ok"
+                else:
+                    rows = _twse_openapi_rows_from_json_text(resp.text or "", debug, "requests")
+            except Exception as e2:
+                debug["requests_error"] = f"requests（放寬 SSL 後仍失敗）：{type(e2).__name__}: {e2}"
+                debug["final_status"] = "requests_exception"
+        else:
+            debug["requests_error"] = f"requests 例外：{type(e).__name__}: {e}"
+            debug["final_status"] = "requests_exception"
+
+    if not rows:
+        debug["urllib_attempted"] = True
         req = Request(url, headers=headers)
-        with urlopen(req, timeout=15) as resp:
-            payload = resp.read().decode("utf-8", errors="ignore")
-        data = json.loads(payload)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for key in ["data", "rows", "items", "result", "results"]:
-                val = data.get(key)
-                if isinstance(val, list):
-                    return val
-            return [data]
-    except Exception:
-        pass
-    return []
+        try:
+            with urlopen(req, timeout=15) as resp:
+                payload = resp.read().decode("utf-8", errors="ignore")
+            text = (payload or "").strip()
+            rows = _twse_openapi_rows_from_json_text(text, debug, "urllib")
+        except Exception as e:
+            err0 = f"urllib 例外：{type(e).__name__}: {e}"
+            debug["urllib_error"] = err0
+            if debug["final_status"] == "empty":
+                debug["final_status"] = "urllib_exception"
+            if _is_twse_ssl_verify_failure(e):
+                try:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    debug["urllib_ssl_relaxed"] = True
+                    with urlopen(req, timeout=15, context=ctx) as resp:
+                        payload = resp.read().decode("utf-8", errors="ignore")
+                    text = (payload or "").strip()
+                    rows = _twse_openapi_rows_from_json_text(text, debug, "urllib")
+                    if rows:
+                        debug["urllib_error"] = None
+                except Exception as e2:
+                    debug["urllib_error"] = f"{err0}；urllib（放寬 SSL）：{type(e2).__name__}: {e2}"
+
+    if not rows and debug["final_status"] == "empty":
+        debug["final_status"] = "no_rows_both_paths_failed"
+    elif not rows and debug["rows_count"] == 0:
+        debug["rows_count"] = 0
+
+    return rows, debug
+
+
+def fetch_twse_openapi(endpoint: str):
+    """呼叫 openapi.twse.com.tw/v1；失敗時仍回傳 []，但會寫入 session 偵錯（不靜默）。"""
+    rows, dbg = _fetch_twse_openapi_impl(endpoint)
+    _twse_openapi_debug_store(endpoint, dbg)
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1536,37 +1771,122 @@ def fetch_twse_openapi(endpoint: str):
 #  端點：/v1/exchangeReport/MI_INDEX（中文欄位）
 #  備用：/v1/exchangeReport/STOCK_DAY_ALL 只有個股，不含大盤
 # ─────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=180, show_spinner=False)
 def fetch_twse_market_index():
     """
     大盤加權指數 + 成交金額 + 成交股數
     端點：/v1/exchangeReport/MI_INDEX  ← 欄位全是中文
     欄位：指數、收盤指數、漲跌、漲跌點數
+    附帶 debug：供畫面顯示為何未採用證交所收盤（不另做 cache，避免掩蓋失敗原因）。
     """
-    rows = fetch_twse_openapi("exchangeReport/MI_INDEX")
-    result = {
-        "index_value": None, "index_change": None,
-        "market_amount": None, "market_shares": None,
-        "effective_date": None, "raw": rows[:8],
+    mi_ep = "exchangeReport/MI_INDEX"
+    rows = fetch_twse_openapi(mi_ep)
+    try:
+        mi_openapi_dbg = dict(st.session_state.get("twse_openapi_debug_by_endpoint", {}).get(mi_ep, {}))
+    except Exception:
+        mi_openapi_dbg = {}
+
+    dbg = {
+        "twse_rows_count": len(rows),
+        "mi_openapi": mi_openapi_dbg,
+        "chosen_index_name": None,
+        "chosen_index_value_raw": None,
+        "chosen_index_value_parsed": None,
+        "best_prio": None,
+        "fallback_row_index": None,
+        "source_reason": "",
+        "reject_reason": None,
+        "effective_date": None,
+        "note_cache": "fetch_twse_market_index 未使用 @st.cache_data，每次呼叫皆重新打 MI_INDEX。",
     }
+
+    result = {
+        "index_value": None,
+        "index_change": None,
+        "market_amount": None,
+        "market_shares": None,
+        "effective_date": None,
+        "raw": rows[:8],
+        "debug": dbg,
+    }
+
+    if not rows:
+        dbg["source_reason"] = "MI_INDEX 回傳 0 筆（rows 為空）。請看 mi_openapi：requests／urllib／JSON 哪一層失敗。"
+        return result
+
+    if mi_openapi_dbg.get("final_status") not in ("ok", "ok_urllib"):
+        dbg["source_reason"] = (
+            f"OpenAPI 連線／解析未標記為成功（final_status={mi_openapi_dbg.get('final_status')!r}），"
+            "但仍嘗試解析已回傳之 rows。"
+        )
+
+    # 優先對準「發行量加權股價指數」本列
+    best_row = None
+    best_prio = -1
     for row in rows:
-        # 中文欄位（MI_INDEX 回傳中文 key）
         name = str(row.get("指數") or row.get("Index") or "")
-        if "發行量加權" in name or "加權" in name:
-            result["index_value"]  = parse_num(row.get("收盤指數") or row.get("ClosingIndex"))
-            result["index_change"] = parse_num(row.get("漲跌點數") or row.get("Change"))
-            # MI_INDEX 不一定有成交額，抓第一筆試試
-            result["market_amount"]  = parse_num(row.get("成交金額") or row.get("TradeValue"))
-            result["market_shares"] = parse_num(row.get("成交股數") or row.get("TradeVolume"))
-            break
-    # 若沒找到「加權」，取第一筆
+        prio = 0
+        if "發行量加權股價指數" in name:
+            prio = 4
+        elif name.strip() == "加權指數":
+            prio = 3
+        elif "發行量加權" in name and "報酬" not in name:
+            prio = 2
+        elif "加權" in name and "報酬" not in name:
+            prio = 1
+        if prio > best_prio:
+            best_prio = prio
+            best_row = row
+    dbg["best_prio"] = best_prio
+
+    if best_row is not None:
+        raw_close = best_row.get("收盤指數") if best_row.get("收盤指數") is not None else best_row.get("ClosingIndex")
+        dbg["chosen_index_name"] = str(best_row.get("指數") or best_row.get("Index") or "")
+        dbg["chosen_index_value_raw"] = raw_close
+        parsed = parse_num(raw_close)
+        dbg["chosen_index_value_parsed"] = parsed
+        if parsed is None:
+            dbg["source_reason"] = (
+                f"有命中優先列（prio={best_prio}，指數名稱：{dbg['chosen_index_name']!r}），"
+                f"但 parse_num(收盤指數) 失敗；原始欄位值：{raw_close!r}。"
+            )
+        else:
+            dbg["source_reason"] = f"命中優先列（prio={best_prio}）並成功解析收盤指數。"
+        result["index_value"] = parsed
+        result["index_change"] = parse_num(best_row.get("漲跌點數") or best_row.get("Change"))
+        result["market_amount"] = parse_num(best_row.get("成交金額") or best_row.get("TradeValue"))
+        result["market_shares"] = parse_num(best_row.get("成交股數") or best_row.get("TradeVolume"))
+
     if result["index_value"] is None and rows:
-        r = rows[0]
-        result["index_value"]  = parse_num(r.get("收盤指數") or r.get("ClosingIndex"))
-        result["index_change"] = parse_num(r.get("漲跌點數") or r.get("Change"))
-        result["market_amount"]  = parse_num(r.get("成交金額") or r.get("TradeValue"))
-        result["market_shares"] = parse_num(r.get("成交股數") or r.get("TradeVolume"))
-    # 成交額備援：從 STOCK_DAY_ALL 加總（英文欄位 TradeValue）
+        for i, r in enumerate(rows):
+            raw_c = r.get("收盤指數") if r.get("收盤指數") is not None else r.get("ClosingIndex")
+            v = parse_num(raw_c)
+            if v is not None:
+                dbg["fallback_row_index"] = i
+                dbg["chosen_index_name"] = str(r.get("指數") or r.get("Index") or "") or dbg.get("chosen_index_name")
+                dbg["chosen_index_value_raw"] = raw_c
+                dbg["chosen_index_value_parsed"] = v
+                dbg["source_reason"] = f"優先列無有效收盤，改採第 {i} 筆第一個可解析之「收盤指數」。"
+                result["index_value"] = v
+                result["index_change"] = parse_num(r.get("漲跌點數") or r.get("Change"))
+                result["market_amount"] = parse_num(r.get("成交金額") or r.get("TradeValue"))
+                result["market_shares"] = parse_num(r.get("成交股數") or r.get("TradeVolume"))
+                break
+
+    if result["index_value"] is None:
+        dbg["source_reason"] = dbg["source_reason"] or "有 rows 但無法從任何列解析出收盤指數（欄位名稱或格式與預期不符）。"
+        if rows and isinstance(rows[0], dict):
+            dbg["first_row_keys_sample"] = list(rows[0].keys())[:24]
+
+    iv = result["index_value"]
+    if iv is not None:
+        try:
+            ivf = float(iv)
+        except (TypeError, ValueError):
+            ivf = 0.0
+        if ivf < 5000:
+            dbg["reject_reason"] = f"解析值 {ivf} 低於內定門檻 5000，視為異常，不採用為加權收盤。"
+            dbg["source_reason"] = (dbg.get("source_reason") or "") + " " + dbg["reject_reason"]
+
     if result["market_amount"] is None or result["market_shares"] is None:
         day_rows = fetch_twse_openapi("exchangeReport/STOCK_DAY_ALL")
         total_val = sum(parse_num(r.get("TradeValue")) or 0 for r in day_rows)
@@ -1575,8 +1895,10 @@ def fetch_twse_market_index():
             result["market_amount"] = total_val
         if total_vol > 0 and result["market_shares"] is None:
             result["market_shares"] = total_vol
+
     if rows and isinstance(rows[0], dict):
         result["effective_date"] = str(rows[0].get("日期") or rows[0].get("Date") or "")
+    dbg["effective_date"] = result["effective_date"]
     return result
 
 
@@ -1635,6 +1957,7 @@ def get_twse_market_snapshot_v2():
         "source_endpoint": "TWSE_OPENAPI_V1/MI_INDEX",
         "raw": (idx_data.get("raw") or []) + (ms_data.get("raw") or []),
         "source_rows": len((idx_data.get("raw") or []) + (ms_data.get("raw") or [])),
+        "taiex_debug": idx_data.get("debug"),
     }
     return snapshot
 
@@ -2935,8 +3258,78 @@ def format_amount_yi_shares(value):
         return str(value)
 
 
+def _parse_rss_feed(url: str, source_name: str, max_items: int = 8) -> list[dict]:
+    """抓取 RSS XML 並解析成標準格式，失敗回傳空 list。"""
+    import xml.etree.ElementTree as ET
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if not resp.ok:
+            return []
+        root = ET.fromstring(resp.content)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        items = []
+        # 標準 RSS 2.0
+        for item in root.findall(".//item")[:max_items]:
+            title = (item.findtext("title") or "").strip()
+            link  = (item.findtext("link")  or "").strip()
+            pub   = (item.findtext("pubDate") or "").strip()
+            if not title:
+                continue
+            time_str = ""
+            if pub:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    dt = parsedate_to_datetime(pub)
+                    tw_tz = ZoneInfo("Asia/Taipei")
+                    time_str = dt.astimezone(tw_tz).strftime("%m/%d %H:%M")
+                except Exception:
+                    time_str = pub[:16]
+            items.append({"title": title, "link": link, "publisher": source_name, "time": time_str})
+        # Atom feed 備援
+        if not items:
+            for entry in root.findall(".//atom:entry", ns)[:max_items]:
+                title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
+                link_el = entry.find("atom:link", ns)
+                link = (link_el.get("href", "") if link_el is not None else "").strip()
+                pub = (entry.findtext("atom:updated", namespaces=ns) or "").strip()
+                if not title:
+                    continue
+                time_str = pub[:16].replace("T", " ") if pub else ""
+                items.append({"title": title, "link": link, "publisher": source_name, "time": time_str})
+        return items
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_tw_stock_news() -> list[dict]:
+    """
+    雙來源台股新聞：
+    1. 鉅亨網台股新聞 RSS（主要）
+    2. Yahoo 奇摩股市 RSS（備援）
+    5 分鐘快取，按需更新，不頻繁重抓。
+    """
+    # 來源 A：鉅亨網台股
+    items = _parse_rss_feed(
+        "https://www.cnyes.com/rss/cat/tw_stock",
+        source_name="鉅亨網",
+    )
+    # 來源 B：Yahoo 奇摩股市（備援）
+    if not items:
+        items = _parse_rss_feed(
+            "https://tw.stock.yahoo.com/rss",
+            source_name="Yahoo 奇摩股市",
+        )
+    return items
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def get_stock_news(symbol: str):
+    """個股新聞（單股詳細頁用），保留原有 yfinance 路徑。"""
     items = []
     try:
         ticker = yf.Ticker(symbol)
@@ -2957,6 +3350,7 @@ def get_stock_news(symbol: str):
     except Exception:
         return []
     return items
+
 
 def summarize_event_signals(row, news_items):
     titles = [x.get("title", "") for x in news_items if x.get("title")]
@@ -2999,20 +3393,454 @@ def summarize_event_signals(row, news_items):
     return bullets[:4]
 
 
+TAIEX_YAHOO_FALLBACK_NOTICE = (
+    "在「靜態收盤基準日」對齊前提下，本輪未能採用證交所官方加權收盤，"
+    "因此暫以 Yahoo ^TWII **日線收盤**備援（非盤中即時），數值可能與正式收盤略有差異。"
+)
+
+# 台股國定假日等：可逐年擴充；未列入者僅以週末判斷非交易日
+_TWSE_EXTRA_HOLIDAYS: frozenset[date] = frozenset()
+
+
+def _is_twse_trading_day(d: date) -> bool:
+    if d.weekday() >= 5:
+        return False
+    return d not in _TWSE_EXTRA_HOLIDAYS
+
+
+def _previous_twse_trading_day(d: date, max_scan: int = 400) -> date:
+    cur = d - timedelta(days=1)
+    for _ in range(max_scan):
+        if _is_twse_trading_day(cur):
+            return cur
+        cur -= timedelta(days=1)
+    return d - timedelta(days=1)
+
+
+def _taiex_static_display_context(now_tpe: datetime | None = None) -> dict:
+    """
+    靜態加權基準：交易日上午 9:00～13:30 顯示「上一交易日」收盤；
+    該日 13:30 後至次一交易日 09:00 前顯示「當日（剛收盤之交易日）」收盤；
+    非交易日全日沿用最近交易日收盤（與收盤後視窗相同語意）。
+    """
+    tpe = ZoneInfo("Asia/Taipei")
+    nt = now_tpe or datetime.now(tpe)
+    if nt.tzinfo is None:
+        nt = nt.replace(tzinfo=tpe)
+    else:
+        nt = nt.astimezone(tpe)
+    d = nt.date()
+    t = nt.time()
+    open_t = time(9, 0)
+    sess_end = time(13, 30)
+    if _is_twse_trading_day(d):
+        if open_t <= t < sess_end:
+            anchor = _previous_twse_trading_day(d)
+            label = "上一交易日收盤加權"
+            mode_key = "prev_session"
+        elif t >= sess_end:
+            anchor = d
+            label = "當日收盤加權"
+            mode_key = "same_day_close"
+        else:
+            anchor = _previous_twse_trading_day(d)
+            label = "當日收盤加權"
+            mode_key = "overnight_last_close"
+    else:
+        anchor = _previous_twse_trading_day(d)
+        label = "當日收盤加權"
+        mode_key = "non_trading_day"
+    caption = f"**{label}**（基準日 {anchor.isoformat()}）"
+    return {
+        "anchor_date": anchor,
+        "label": label,
+        "mode_key": mode_key,
+        "caption": caption,
+    }
+
+
+def _parse_twse_calendar_date(s: str) -> date | None:
+    """
+    將證交所常見日期字串轉成西元 date。
+    支援：1150408（民國115年04月08日）、20260408（西元）、114/04/08、114年4月8日 等。
+    """
+    if s is None:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+
+    digits_only = re.sub(r"\D", "", raw)
+    # 西元 YYYYMMDD（8 碼）
+    if len(digits_only) == 8:
+        try:
+            y = int(digits_only[:4])
+            mo = int(digits_only[4:6])
+            da = int(digits_only[6:8])
+            if y >= 1900:
+                return date(y, mo, da)
+        except ValueError:
+            pass
+    # 民國 YYYMMDD（7 碼，例如 1150408 → 2026-04-08）
+    if len(digits_only) == 7:
+        try:
+            roc_y = int(digits_only[:3])
+            mo = int(digits_only[3:5])
+            da = int(digits_only[5:7])
+            gy = roc_y + 1911
+            return date(gy, mo, da)
+        except ValueError:
+            pass
+    # 民國 YYMMDD（6 碼，較少見）
+    if len(digits_only) == 6:
+        try:
+            roc_y = int(digits_only[:2])
+            mo = int(digits_only[2:4])
+            da = int(digits_only[4:6])
+            gy = roc_y + 1911
+            return date(gy, mo, da)
+        except ValueError:
+            pass
+
+    norm = raw.replace("年", "/").replace("月", "/").replace("日", "").replace("-", "/")
+    nums = re.findall(r"\d+", norm)
+    if len(nums) >= 3:
+        y, mo, da = int(nums[0]), int(nums[1]), int(nums[2])
+        if y < 400:
+            y += 1911
+        try:
+            return date(y, mo, da)
+        except ValueError:
+            return None
+    return None
+
+
+def _pack_taiex_resolve_debug(extra: dict | None) -> dict:
+    if not extra:
+        return {}
+    return {
+        "base_date": extra.get("base_date"),
+        "raw_effective_date": extra.get("raw_effective_date"),
+        "normalized_effective_date": extra.get("normalized_effective_date"),
+        "date_match_result": extra.get("date_match_result"),
+        "fallback_trigger_reason": extra.get("fallback_trigger_reason"),
+    }
+
+
+def _index_row_date_tpe(ts) -> date:
+    ts_dt = pd.Timestamp(ts)
+    if ts_dt.tzinfo is not None:
+        return ts_dt.tz_convert(ZoneInfo("Asia/Taipei")).date()
+    return ts_dt.date()
+
+
+def _slice_twii_through_anchor(df: pd.DataFrame, anchor: date) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    mask = []
+    for idx in df.index:
+        try:
+            mask.append(_index_row_date_tpe(idx) <= anchor)
+        except Exception:
+            mask.append(True)
+    sub = df.loc[mask]
+    return sub if sub is not None and not sub.empty else df.iloc[0:0]
+
+
+def _close_from_yahoo_daily_for_date(df: pd.DataFrame, anchor: date) -> float | None:
+    """取 Yahoo 日線中「基準日」當日收盤；尚無該日棒時改取不晚於基準日之最近一筆（仍為日線收盤）。"""
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    exact = None
+    best_d: date | None = None
+    best_c = None
+    for i in range(len(df)):
+        d = _index_row_date_tpe(df.index[i])
+        try:
+            c = float(df["Close"].iloc[i])
+        except Exception:
+            continue
+        if d == anchor:
+            exact = c
+        if d <= anchor and c >= 5000 and (best_d is None or d > best_d):
+            best_d = d
+            best_c = c
+    if exact is not None and exact >= 5000:
+        return float(exact)
+    if best_c is not None:
+        return float(best_c)
+    return None
+
+
+def _resolve_taiex_static(anchor_date: date, yahoo_df: pd.DataFrame, tw_pack: dict | None = None) -> tuple[float, str, dict]:
+    """手動 > 證交所 OpenAPI（effective_date 正規化後須與基準日一致）> Yahoo 日線；日期已對齊時不得改走 Yahoo。"""
+    if tw_pack is None:
+        tw_pack = fetch_twse_market_index()
+    raw_eff = tw_pack.get("effective_date")
+    ed = _parse_twse_calendar_date(str(raw_eff or ""))
+    twse_date_matches = ed is not None and ed == anchor_date
+
+    extra: dict = {
+        "twse_market": tw_pack,
+        "anchor_date": anchor_date.isoformat(),
+        "base_date": anchor_date.isoformat(),
+        "raw_effective_date": raw_eff,
+        "normalized_effective_date": ed.isoformat() if ed else None,
+        "date_match_result": twse_date_matches,
+        "fallback_trigger_reason": None,
+    }
+
+    try:
+        man = float(st.session_state.get("manual_taiex_override") or 0)
+    except (TypeError, ValueError):
+        man = 0.0
+    if man >= 5000:
+        extra["fallback_trigger_reason"] = "手動覆寫加權指數（略過證交所／Yahoo）"
+        return man, "manual", extra
+
+    iv = tw_pack.get("index_value")
+    ivf = None
+    if iv is not None:
+        try:
+            ivf = float(iv)
+        except (TypeError, ValueError):
+            ivf = None
+
+    if ivf is not None and ivf >= 5000 and twse_date_matches:
+        extra["date"] = raw_eff
+        extra["fallback_trigger_reason"] = "無（證交所資料日與靜態基準日一致，採用 OpenAPI）"
+        return ivf, "twse", extra
+
+    if ivf is not None and ivf >= 5000 and ed is None:
+        extra["fallback_trigger_reason"] = (
+            f"證交所 index_value 有效但 effective_date 無法正規化（原文：{raw_eff!r}），改採 Yahoo 日線"
+        )
+    elif ivf is not None and ivf >= 5000:
+        extra["fallback_trigger_reason"] = (
+            f"證交所資料日 {ed} 與靜態基準日 {anchor_date} 不一致，改採 Yahoo 日線"
+        )
+    elif ivf is None or ivf < 5000:
+        extra["fallback_trigger_reason"] = "證交所 index_value 缺失或低於門檻（<5000），改採 Yahoo 日線"
+
+    y = _close_from_yahoo_daily_for_date(yahoo_df, anchor_date)
+    if y is not None and y >= 5000:
+        extra["static_fallback_note"] = extra.get("fallback_trigger_reason") or "Yahoo ^TWII 日線備援"
+        return float(y), "yahoo", extra
+
+    if ivf is not None and ivf >= 5000:
+        extra["date"] = raw_eff
+        extra["fallback_trigger_reason"] = (
+            (extra.get("fallback_trigger_reason") or "") + "；Yahoo 無對應日線，暫用 OpenAPI 數值（請核對日期）"
+        )
+        return ivf, "twse", extra
+
+    extra["fallback_trigger_reason"] = extra.get("fallback_trigger_reason") or "無可用加權收盤"
+    return 0.0, "yahoo", extra
+
+
+def render_market_taiex_diagnostics(market_info: dict):
+    """市場概況：加權來源＋TWSE 偵錯（含 OpenAPI 層級錯誤）。"""
+    tw = market_info.get("twse_market_probe") or {}
+    dbg = tw.get("debug") or market_info.get("taiex_debug") or {}
+    if not tw and not dbg:
+        return
+    src = market_info.get("taiex_source")
+    mi = dbg.get("mi_openapi") or {}
+    iv_raw = tw.get("index_value")
+    eff = tw.get("effective_date") or dbg.get("effective_date")
+
+    if src == "manual":
+        st.success("**加權收盤來源：手動覆寫**（側欄「加權指數來源／手動修正」）。證交所若連線失敗不影響目前顯示數字。")
+    elif src == "twse":
+        st.info(f"**加權收盤來源：證交所 OpenAPI**（effective_date：**{eff or '—'}**；index_value：**{iv_raw}**）。")
+    elif src == "yahoo":
+        st.warning(TAIEX_YAHOO_FALLBACK_NOTICE)
+    elif src is None:
+        st.caption("**大盤 K 線資料不足**，以下仍顯示本次證交所 MI_INDEX 連線偵錯。")
+
+    ad = market_info.get("taiex_anchor_date")
+    ad_s = ad.isoformat() if hasattr(ad, "isoformat") else (ad or "—")
+    trd = market_info.get("taiex_static_resolve_debug") or {}
+    lines = [
+        f"- **靜態基準**：{market_info.get('taiex_static_label') or '—'}（基準日 `{ad_s}`）",
+        f"- **base_date（靜態基準日）**：`{trd.get('base_date') or '—'}`",
+        f"- **raw_effective_date（TWSE 原文）**：`{trd.get('raw_effective_date')!r}`",
+        f"- **normalized_effective_date**：`{trd.get('normalized_effective_date') or '—'}`",
+        f"- **date_match_result**：`{trd.get('date_match_result')}`",
+        f"- **fallback_trigger_reason**：{trd.get('fallback_trigger_reason') or '—'}",
+        f"- **taiex_source**：`{src}`",
+        f"- **TWSE MI_INDEX rows 筆數**：{dbg.get('twse_rows_count', '—')}",
+        f"- **TWSE index_value（解析後）**：{iv_raw}",
+        f"- **effective_date**：{eff or '—'}",
+        f"- **chosen_index_name**：{dbg.get('chosen_index_name')!r}",
+        f"- **chosen_index_value_raw**：{dbg.get('chosen_index_value_raw')!r}",
+        f"- **chosen_index_value_parsed**：{dbg.get('chosen_index_value_parsed')}",
+        f"- **source_reason**：{dbg.get('source_reason') or '—'}",
+        f"- **reject_reason**：{dbg.get('reject_reason') or '—'}",
+        f"- **best_prio**：{dbg.get('best_prio')}",
+        f"- **fallback_row_index**：{dbg.get('fallback_row_index')}",
+    ]
+    openapi_status = mi.get("final_status")
+    lines.append(f"- **OpenAPI final_status**：`{openapi_status}`（HTTP {mi.get('requests_http_status', '—')}）")
+    if mi.get("requests_error"):
+        lines.append(f"- **requests 錯誤**：{mi.get('requests_error')}")
+    if mi.get("urllib_error"):
+        lines.append(f"- **urllib 錯誤**：{mi.get('urllib_error')}")
+    if mi.get("json_error"):
+        lines.append(f"- **JSON 錯誤**：{mi.get('json_error')}")
+    if mi.get("response_empty"):
+        lines.append("- **response_empty**：True")
+
+    _openapi_bad = mi.get("final_status") not in ("ok", "ok_urllib")
+    with st.expander(
+        "加權指數／TWSE OpenAPI 偵錯詳情",
+        expanded=False,  # 預設收起；有問題時請手動展開查看
+    ):
+        st.markdown("\n".join(lines))
+        if mi:
+            st.caption("以下為本次 MI_INDEX 之 `fetch_twse_openapi` 完整偵錯（含 body 預覽）。")
+            st.json(mi)
+        if dbg.get("first_row_keys_sample"):
+            st.caption("MI_INDEX 第一筆欄位鍵名（供對照欄位是否改版）：")
+            st.code(", ".join(dbg["first_row_keys_sample"]))
+
+
+def _patch_twii_dataframe_close(df: pd.DataFrame, resolved_close: float) -> pd.DataFrame:
+    """將最後一日 Close（必要時連動 High/Low）改為官方／手動加權收盤，以利均線與濾網一致。"""
+    if df is None or df.empty or "Close" not in df.columns:
+        return df
+    try:
+        y = float(df["Close"].iloc[-1])
+    except Exception:
+        return df
+    try:
+        rc = float(resolved_close)
+    except (TypeError, ValueError):
+        return df
+    if abs(rc - y) < 1e-4:
+        return df
+    out = df.copy()
+    ci = out.columns.get_loc("Close")
+    out.iloc[-1, ci] = rc
+    if "High" in out.columns:
+        hi = out.columns.get_loc("High")
+        h = float(out.iloc[-1, hi])
+        if rc > h:
+            out.iloc[-1, hi] = rc
+    if "Low" in out.columns:
+        lo = out.columns.get_loc("Low")
+        l = float(out.iloc[-1, lo])
+        if rc < l:
+            out.iloc[-1, lo] = rc
+    return out
+
+
+def _ensure_twii_bar_through_anchor(df: pd.DataFrame, anchor: date, resolved_close: float) -> pd.DataFrame:
+    """僅用日線：截斷至基準日，必要時補上基準日單棒，並將該日 Close 對齊解析後之靜態收盤。"""
+    sub = _slice_twii_through_anchor(df, anchor)
+    if sub is None or sub.empty:
+        return df
+    try:
+        rc = float(resolved_close)
+    except (TypeError, ValueError):
+        return sub
+    if rc < 5000:
+        return sub
+    try:
+        last_d = _index_row_date_tpe(sub.index[-1])
+    except Exception:
+        return sub
+    out = sub.copy()
+    if last_d < anchor:
+        bar = pd.Timestamp(datetime.combine(anchor, time(0, 0)))
+        out.loc[bar, ["Open", "High", "Low", "Close", "Volume"]] = [rc, rc, rc, rc, 0.0]
+        out = out.sort_index()
+        return normalize_df(out)
+    return _patch_twii_dataframe_close(out, rc)
+
+
 def market_filter():
+    tctx = _taiex_static_display_context()
+    anchor: date = tctx["anchor_date"]
+    tw_pack = fetch_twse_market_index()
     df = get_market_data()
     if df.empty or len(df) < 20:
-        return {"label": "資料不足", "score_adj": 0, "text": "大盤資料不足。", "close": None}
+        raw_eff = tw_pack.get("effective_date")
+        ed = _parse_twse_calendar_date(str(raw_eff or ""))
+        preview_dbg = {
+            "base_date": anchor.isoformat(),
+            "raw_effective_date": raw_eff,
+            "normalized_effective_date": ed.isoformat() if ed else None,
+            "date_match_result": bool(ed is not None and ed == anchor),
+            "fallback_trigger_reason": "大盤 ^TWII 日線不足（<20 根），尚未完成來源決定",
+        }
+        return {
+            "label": "資料不足",
+            "score_adj": 0,
+            "text": "大盤資料不足。",
+            "close": None,
+            "taiex_source": None,
+            "twse_market_probe": tw_pack,
+            "taiex_debug": tw_pack.get("debug"),
+            "taiex_yahoo_notice": None,
+            "taiex_static_caption": tctx["caption"],
+            "taiex_static_label": tctx["label"],
+            "taiex_anchor_date": anchor,
+            "taiex_mode_key": tctx["mode_key"],
+            "taiex_static_resolve_debug": preview_dbg,
+        }
+    resolved, src, extra = _resolve_taiex_static(anchor, df, tw_pack)
+    resolve_dbg = _pack_taiex_resolve_debug(extra)
+    tws = extra.get("twse_market") or tw_pack
+    df = _ensure_twii_bar_through_anchor(df, anchor, resolved)
+    if df.empty or len(df) < 20:
+        return {
+            "label": "資料不足",
+            "score_adj": 0,
+            "text": "大盤資料不足。",
+            "close": None,
+            "taiex_source": None,
+            "twse_market_probe": tw_pack,
+            "taiex_debug": tw_pack.get("debug"),
+            "taiex_yahoo_notice": None,
+            "taiex_static_caption": tctx["caption"],
+            "taiex_static_label": tctx["label"],
+            "taiex_anchor_date": anchor,
+            "taiex_mode_key": tctx["mode_key"],
+            "taiex_static_resolve_debug": {**resolve_dbg, "fallback_trigger_reason": "截斷／補棒後日線不足"},
+        }
     df = indicators(df)
-    close = float(df["Close"].iloc[-1])
-    ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else close
-    ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
-    prev5 = float(df["Close"].iloc[-5]) if len(df) >= 5 else close
-    if close > ma20 and ma5 >= ma20 and close > prev5:
-        return {"label": "偏多", "score_adj": 8, "text": "大盤站上月線且短線偏強。", "close": round(close, 2)}
-    if close < ma20 and ma5 < ma20 and close < prev5:
-        return {"label": "偏空", "score_adj": -10, "text": "大盤偏弱，建議保守。", "close": round(close, 2)}
-    return {"label": "中性", "score_adj": 0, "text": "大盤方向不明，宜選強不選弱。", "close": round(close, 2)}
+    eff_close = float(resolved) if resolved >= 5000 else float(df["Close"].iloc[-1])
+    close = round(eff_close, 2) if eff_close >= 5000 else None
+    ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else eff_close
+    ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else eff_close
+    prev5 = float(df["Close"].iloc[-5]) if len(df) >= 5 else eff_close
+    if src == "manual":
+        src_hint = "加權收盤：手動覆寫。"
+    elif src == "twse":
+        src_hint = f"加權收盤：證交所 OpenAPI（資料日 {extra.get('date') or '—'}）。"
+    else:
+        src_hint = "加權收盤：Yahoo ^TWII 日線（備援）。"
+    if extra.get("static_fallback_note"):
+        src_hint = f"{src_hint} {extra['static_fallback_note']}"
+    base = {
+        "close": close,
+        "taiex_source": src,
+        "taiex_hint": src_hint,
+        "twse_market_probe": tws,
+        "taiex_debug": tws.get("debug") if isinstance(tws, dict) else {},
+        "taiex_yahoo_notice": TAIEX_YAHOO_FALLBACK_NOTICE if src == "yahoo" else None,
+        "taiex_static_caption": tctx["caption"],
+        "taiex_static_label": tctx["label"],
+        "taiex_anchor_date": anchor,
+        "taiex_mode_key": tctx["mode_key"],
+        "taiex_static_resolve_debug": resolve_dbg,
+    }
+    if eff_close > ma20 and ma5 >= ma20 and eff_close > prev5:
+        return {**base, "label": "偏多", "score_adj": 8, "text": "大盤站上月線且短線偏強。"}
+    if eff_close < ma20 and ma5 < ma20 and eff_close < prev5:
+        return {**base, "label": "偏空", "score_adj": -10, "text": "大盤偏弱，建議保守。"}
+    return {**base, "label": "中性", "score_adj": 0, "text": "大盤方向不明，宜選強不選弱。"}
 
 
 def market_bias(df: pd.DataFrame):
@@ -3934,11 +4762,12 @@ def analyze_one_cached(raw_stock: str, market_adj: int = 0, name_map: dict | Non
     cache = st.session_state.setdefault("_manual_analysis_cache", {})
     key = (str(raw_stock).strip().upper(), int(market_adj or 0), _analysis_refresh_tag(), APP_VERSION)
     if key in cache:
-        return cache[key]
+        hit = cache[key]
+        return dict(hit) if isinstance(hit, dict) else hit
 
     item = analyze_one(raw_stock, market_adj, name_map)
     if item is not None:
-        cache[key] = item
+        cache[key] = dict(item)
         _candidate_stock_cache_set(raw_stock, market_adj, item)
     if len(cache) > 240:
         for old_key in list(cache.keys())[:60]:
@@ -4599,11 +5428,17 @@ def ensure_selected_code(select_source: pd.DataFrame):
     if st.session_state.selected_code not in valid_codes:
         st.session_state.selected_code = valid_codes[0]
 
+
+def _detail_select_label(row_like) -> str:
+    # 「股票」欄已是「CODE（名稱）」格式，直接用即可，不重複加代碼
+    return str(row_like.get("股票", row_like.get("_code", "")))
+
+
 def move_selected(select_source: pd.DataFrame, step: int):
     if select_source.empty:
         return
     codes = select_source["_code"].tolist()
-    names = select_source["股票"].tolist()
+    labels = [_detail_select_label(r) for _, r in select_source.iterrows()]
     ensure_selected_code(select_source)
     try:
         idx = codes.index(st.session_state.selected_code)
@@ -4611,10 +5446,7 @@ def move_selected(select_source: pd.DataFrame, step: int):
         idx = 0
     new_idx = max(0, min(len(codes) - 1, idx + step))
     st.session_state.selected_code = codes[new_idx]
-    if new_idx < len(names):
-        for k in ["detail_select_mobile", "detail_select_pc"]:
-            if k in st.session_state:
-                st.session_state[k] = names[new_idx]
+    # selectbox 用 index= 跟著 selected_code 自動對齊，不需要直接寫 widget key
 
 
 def build_favorites_panel(favs, market_score_adj, name_map):
@@ -5451,6 +6283,30 @@ def load_cached_official_meta():
     return meta if isinstance(meta, dict) else {}
 
 
+def enrich_with_institutional(items: list[dict]) -> list[dict]:
+    """
+    批次將三大法人資料補進 analyze_one 產出的結果。
+    bundle 由 fetch_institutional_bundle_all 提供（已有 ttl=120 快取）。
+    失敗時靜默略過，不影響主流程。
+    """
+    if not items:
+        return items
+    try:
+        bundle = fetch_institutional_bundle_all()
+    except Exception:
+        return items
+    enriched = []
+    for item in items:
+        try:
+            code = str(item.get("_code") or item.get("股票代碼") or "").strip()
+            if code:
+                item = resolve_institutional_context(code, item, bundle)
+        except Exception:
+            pass
+        enriched.append(item)
+    return enriched
+
+
 
 ensure_names_file()
 name_map = load_name_map()
@@ -5474,6 +6330,8 @@ if "preset_strategy" not in st.session_state:
     st.session_state.preset_strategy = "none"
 if "mobile_mode" not in st.session_state:
     st.session_state.mobile_mode = True
+if "manual_taiex_override" not in st.session_state:
+    st.session_state.manual_taiex_override = 0.0
 if "user_list" not in st.session_state:
     st.session_state.user_list = load_users()
 if "current_user" not in st.session_state:
@@ -5612,61 +6470,68 @@ def render_landing_page():
 
     # ── 今日重大新聞 ──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title">📰 今日重大新聞</div>', unsafe_allow_html=True)
+    _news_hdr_l, _news_hdr_r = st.columns([6, 1])
+    _news_hdr_l.markdown('<div class="lp-section-title">📰 今日重大新聞</div>', unsafe_allow_html=True)
+    if _news_hdr_r.button("🔄", key="lp_news_refresh", help="手動更新新聞（每 5 分鐘自動快取）"):
+        st.cache_data.clear()
+        st.rerun()
 
     _news_error = False
     _news_items = None
     try:
-        _news_items = get_stock_news("^TWII")
-        if not _news_items:
-            _news_items = get_stock_news("2330.TW")
+        _news_items = fetch_tw_stock_news()
     except Exception:
         _news_error = True
+
+    # 多空關鍵字
+    _BULL_WORDS = ["漲", "多", "買", "升", "突破", "創高", "利多", "擴產", "合作", "訂單", "上修", "增溫", "樂觀", "受惠", "AI", "rally", "gain", "bull", "surge"]
+    _BEAR_WORDS = ["跌", "空", "賣", "降", "下修", "衰退", "虧損", "利空", "賣壓", "疲弱", "下滑", "衝擊", "裁員", "訴訟", "fall", "drop", "bear", "crash"]
 
     if _news_error:
         st.markdown("""
         <div class="lp-state-card error">
             <div class="lp-state-icon">⚠️</div>
             <div class="lp-state-title">新聞載入失敗</div>
-            <div class="lp-state-desc">目前無法從資料來源取得新聞，可能是 API 暫時無回應，請稍後再試</div>
+            <div class="lp-state-desc">鉅亨網與 Yahoo 奇摩股市 RSS 暫時無回應，請按右上角 🔄 重試</div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("🔄 重新整理新聞", use_container_width=True, key="lp_news_retry"):
-            st.rerun()
     elif _news_items:
-        for n in _news_items[:5]:
-            title_text = n.get("title", "")
-            time_text = n.get("time", "")
-            source_text = n.get("publisher", "")
-            title_lower = title_text.lower()
-            if any(w in title_lower for w in ["漲", "多", "買", "升", "rally", "gain", "bull", "up", "high", "surge"]):
+        for n in _news_items[:6]:
+            title_text  = htmllib.escape(n.get("title", ""))
+            time_text   = htmllib.escape(n.get("time", ""))
+            source_text = htmllib.escape(n.get("publisher", ""))
+            link_url    = n.get("link", "")
+            raw_title   = n.get("title", "").lower()
+            if any(w in raw_title for w in _BULL_WORDS):
                 badge_cls, badge_text = "bull", "偏多"
-            elif any(w in title_lower for w in ["跌", "空", "賣", "降", "fall", "drop", "bear", "down", "low", "crash", "sell"]):
+            elif any(w in raw_title for w in _BEAR_WORDS):
                 badge_cls, badge_text = "bear", "偏空"
             else:
                 badge_cls, badge_text = "neutral", "中性"
+            title_html = f'<a href="{link_url}" target="_blank" style="color:inherit;text-decoration:none;">{title_text}</a>' if link_url else title_text
             st.markdown(f"""
             <div class="lp-news-item">
                 <div class="lp-news-meta">
                     <span class="lp-news-badge {badge_cls}">{badge_text}</span>
                     <span class="lp-news-time">{time_text}</span>
                 </div>
-                <div class="lp-news-title">{title_text}</div>
+                <div class="lp-news-title">{title_html}</div>
                 <div class="lp-news-source">{source_text}</div>
             </div>
             """, unsafe_allow_html=True)
+        st.caption("資料來源：鉅亨網 / Yahoo 奇摩股市｜每 5 分鐘自動更新")
     else:
         st.markdown("""
         <div class="lp-state-card empty">
             <div class="lp-state-icon">📭</div>
             <div class="lp-state-title">今日暫無重大市場新聞</div>
-            <div class="lp-state-desc">目前未偵測到可列入首頁的重大事件</div>
+            <div class="lp-state-desc">目前未取得資料，可能是市場休市或 RSS 暫無更新，請稍後按 🔄 重試</div>
         </div>
         """, unsafe_allow_html=True)
 
     # ── 操作流程（精簡版）──
     st.markdown('<div class="lp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-section-title" style="font-size:0.95rem;">🔄 操作流程</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-section-title">🔄 操作流程</div>', unsafe_allow_html=True)
 
     st.markdown("""
     <div class="lp-steps-compact">
@@ -5704,18 +6569,60 @@ def render_landing_page():
 
 
 def render_global_banner():
+    """每頁頂部呼叫一次，顯示大盤狀態欄 + 版本資訊。"""
+    _mi    = st.session_state.get("market_info_cache") or {}
+    _close = _mi.get("close")
+    _chg   = _mi.get("change") or _mi.get("index_change")
+    _label = _mi.get("label", "")
+    _page  = st.session_state.get("current_page", "")
+
+    # 加權指數文字
+    if _close:
+        _chg_txt = ""
+        if _chg is not None:
+            _sign = "+" if _chg >= 0 else ""
+            _color = "#4ade80" if _chg >= 0 else "#f87171"
+            _chg_txt = f'　<span style="color:{_color};font-weight:700;">{_sign}{_chg:.0f}</span>'
+        _idx_part = f'加權　<span style="color:#d8ecff;font-weight:800;">{_close:,.2f}</span>{_chg_txt}'
+    else:
+        _idx_part = '加權　<span style="color:#3a5570;">載入中…</span>'
+
+    # 大盤濾網 pill
+    if _label == "偏多":
+        _pill = f'<span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.25);color:#4ade80;border-radius:99px;padding:2px 10px;font-size:0.76rem;font-weight:700;">▲ 偏多</span>'
+    elif _label == "偏空":
+        _pill = f'<span style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.25);color:#f87171;border-radius:99px;padding:2px 10px;font-size:0.76rem;font-weight:700;">▼ 偏空</span>'
+    elif _label:
+        _pill = f'<span style="background:rgba(100,160,255,0.10);border:1px solid rgba(100,160,255,0.22);color:#93c5fd;border-radius:99px;padding:2px 10px;font-size:0.76rem;font-weight:700;">◆ {_label}</span>'
+    else:
+        _pill = ""
+
+    _sep = '<span style="color:rgba(100,140,220,0.25);margin:0 6px;">│</span>'
+    _page_part = f'{_sep}<span style="color:#3a5570;font-size:0.80rem;">{_page}</span>' if _page else ""
+
     st.markdown(
-        f"""
-        <div class="main-shell" style="padding:1.05rem 1.15rem 0.85rem 1.15rem; margin-bottom:1rem;">
-          <div style="font-size:1.65rem;font-weight:900;color:#f8fafc;line-height:1.2;">🚀 台股短線系統 {APP_VERSION}</div>
-          <div style="font-size:0.95rem;color:#cbd5e1;margin-top:0.4rem;">目前頁面：{st.session_state.current_page}　｜　{APP_VERSION}：{APP_VERSION_NOTE}</div>
-        </div>
-        """,
+        f'''<div style="
+            display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+            background:rgba(8,18,40,0.55);
+            border:1px solid rgba(59,110,248,0.13);
+            border-radius:12px;
+            padding:7px 14px;
+            font-size:0.82rem; color:#5a7898;
+            margin-bottom:0.75rem;
+        ">
+            <span style="font-weight:700;color:#3b6ef8;font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;">大盤</span>
+            {_sep}
+            <span style="color:#5a7898;">{_idx_part}</span>
+            {_sep}
+            <span style="color:#5a7898;">濾網</span>　{_pill}
+            {_page_part}
+            <span style="margin-left:auto;font-size:0.70rem;color:#2a3f58;">{APP_VERSION}</span>
+        </div>''',
         unsafe_allow_html=True,
     )
 
 with st.sidebar:
-    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.15rem;font-weight:800;color:#f8fafc;">{APP_VERSION}</div><div style="font-size:0.86rem;color:#cbd5e1;margin-top:0.35rem;">AI 驅動短線交易分析平台</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nav-card"><div class="nav-title">台股短線系統</div><div style="font-size:1.12rem;font-weight:800;color:#c8dcf8;letter-spacing:-0.01em;">{APP_VERSION}</div><div style="font-size:0.80rem;color:#3a5570;margin-top:0.28rem;">AI 驅動當沖分析平台</div></div>', unsafe_allow_html=True)
     page_list = ["首頁", "分析中心", "市場儀表板", "快照中心", "持倉中心"]
     if st.session_state.current_page not in page_list:
         st.session_state.current_page = "分析中心"
@@ -5723,6 +6630,8 @@ with st.sidebar:
     if page_choice != st.session_state.current_page:
         st.session_state.current_page = page_choice
         st.rerun()
+
+    st.toggle("手機精簡版", key="mobile_mode")
 
     st.markdown('<div class="nav-card"><div class="nav-title">使用者設定</div></div>', unsafe_allow_html=True)
     st.header("👤 使用者")
@@ -5780,6 +6689,16 @@ with st.sidebar:
             st.caption("目前沒有可刪除的其他使用者。")
 
     st.caption(f"目前資料分流：{st.session_state.current_user}")
+    with st.expander("加權指數來源／手動修正", expanded=False):
+        st.number_input(
+            "手動加權收盤指數（設 0＝自動）",
+            min_value=0.0,
+            max_value=200000.0,
+            step=1.0,
+            key="manual_taiex_override",
+            help="自動時依「靜態收盤基準日」對齊：盤中顯示上一交易日收盤，收盤後顯示當日收盤；優先 TWSE OpenAPI，其次 Yahoo ^TWII 日線（非盤中即時）。",
+        )
+        st.caption("設為 **0** 即關閉手動覆寫。")
     st.markdown('<div class="nav-card"><div class="nav-title">目前頁面</div><div style="font-size:1rem;font-weight:700;color:#f8fafc;">' + st.session_state.current_page + '</div><div style="font-size:0.84rem;color:#cbd5e1;margin-top:0.3rem;">目前保留四個正式版主頁：分析中心、市場儀表板、快照中心、持倉中心。V149 直補 TPEx 法人主頁 / OpenAPI 來源，並維持盤前嚴格流動性門檻與自動挑股排序。</div></div>', unsafe_allow_html=True)
     st.header("⭐ 我的最愛")
     favs = st.session_state.favorites
@@ -5791,8 +6710,10 @@ with st.sidebar:
             st.rerun()
         if st.button("一鍵分析最愛"):
             market_info = market_filter()
+            st.session_state["market_info_cache"] = market_info
             tmp = [analyze_one(code, market_info["score_adj"], name_map) for code in favs]
             tmp = [x for x in tmp if x is not None]
+            tmp = enrich_with_institutional(tmp)
             tmp = sorted(tmp, key=lambda x: x["_rank"], reverse=True)
             st.session_state.results_data = tmp
             st.session_state.selected_code = tmp[0]["_code"] if tmp else None
@@ -7407,7 +8328,7 @@ def fmt_pct(v):
     try:
         if _is_missing(v):
             return ""
-        return f"{float(v):.2f}"
+        return f"{float(v):.2f}%"
     except Exception:
         return "" if _is_missing(v) else str(v)
 
@@ -8265,7 +9186,8 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
     if select_source is None or len(select_source) == 0:
         return
     ensure_selected_code(select_source)
-    option_map = {row["股票"]: row["_code"] for _, row in select_source.iterrows()}
+    # 選單鍵必須含 _code，避免不同股票「中文簡稱相同」時 dict 覆寫導致選單與詳細區綁錯檔
+    option_map = {_detail_select_label(row): row["_code"] for _, row in select_source.iterrows()}
     reverse_map = {v: k for k, v in option_map.items()}
 
     with st.container(border=True):
@@ -8274,10 +9196,20 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         current_label = reverse_map.get(st.session_state.selected_code, labels[0])
         current_index = labels.index(current_label) if current_label in labels else 0
 
-        _sel_key = "detail_select_mobile" if st.session_state.mobile_mode else "detail_select_pc"
+        # ── 導航：以 selected_code 為唯一 source of truth ──────────────────
+        # Streamlit 規則：widget key 渲染後不能在同一 run 內直接寫入
+        # session_state[widget_key]。改用 index= 讓 selectbox 自動對齊，
+        # 按鈕與快速查看只改 selected_code，不碰 widget key。
         current_label = reverse_map.get(st.session_state.selected_code, labels[0])
-        if _sel_key not in st.session_state or st.session_state[_sel_key] not in labels:
-            st.session_state[_sel_key] = current_label
+        current_index = labels.index(current_label) if current_label in labels else 0
+        code_values = list(option_map.values())
+        pos_idx = (code_values.index(st.session_state.selected_code) + 1
+                   if st.session_state.selected_code in code_values else 1)
+
+        def _on_select_change(sel_key):
+            val = st.session_state.get(sel_key)
+            if val and val in option_map:
+                st.session_state.selected_code = option_map[val]
 
         if st.session_state.mobile_mode:
             nav1, nav2 = st.columns(2)
@@ -8285,12 +9217,9 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                         on_click=move_selected, args=(select_source, -1))
             nav2.button("下一檔", use_container_width=True, key="detail_next_mobile",
                         on_click=move_selected, args=(select_source, 1))
-            st.selectbox("選擇查看單股", labels, key="detail_select_mobile")
-            sel_val = st.session_state.get("detail_select_mobile")
-            if sel_val and sel_val in option_map:
-                st.session_state.selected_code = option_map[sel_val]
-            code_values = list(option_map.values())
-            pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
+            st.selectbox("選擇查看單股", labels, index=current_index,
+                         key="detail_select_mobile",
+                         on_change=_on_select_change, args=("detail_select_mobile",))
             st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
         else:
             nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 2])
@@ -8301,13 +9230,10 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 st.button("下一檔", use_container_width=True, key="detail_next_pc",
                           on_click=move_selected, args=(select_source, 1))
             with nav3:
-                st.selectbox("選擇查看單股", labels, key="detail_select_pc")
-                sel_val = st.session_state.get("detail_select_pc")
-                if sel_val and sel_val in option_map:
-                    st.session_state.selected_code = option_map[sel_val]
+                st.selectbox("選擇查看單股", labels, index=current_index,
+                             key="detail_select_pc",
+                             on_change=_on_select_change, args=("detail_select_pc",))
             with nav4:
-                code_values = list(option_map.values())
-                pos_idx = code_values.index(st.session_state.selected_code) + 1 if st.session_state.selected_code in code_values else 1
                 st.caption(f"目前位置：{pos_idx} / {len(option_map)}")
 
             st.markdown("#### 快速查看")
@@ -8315,6 +9241,7 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
             top_quick = select_source.head(5)
             for col, (_, quick_row) in zip(quick_cols, top_quick.iterrows()):
                 if col.button(quick_row["股票"], use_container_width=True, key=f"quick_{quick_row['_code']}"):
+                    # 只改 selected_code，不碰已渲染的 widget key
                     st.session_state.selected_code = quick_row["_code"]
 
         _matched = df_result[df_result["_code"] == st.session_state.selected_code]
@@ -8343,14 +9270,19 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
         detail_view_mode = st.radio("檢視模式", ["決策摘要", "技術細節", "官方資料"], horizontal=True, key="detail_view_mode")
 
         if detail_view_mode == "決策摘要":
-            load_inst = st.toggle("載入法人資料", value=False, key=f"load_inst_{st.session_state.selected_code}")
-            if load_inst:
-                row = pd.Series(resolve_institutional_context(st.session_state.selected_code, row, fetch_institutional_bundle_all()))
-            else:
-                row = pd.Series(dict(row))
-                row["法人方向"] = row.get("法人方向", "未載入") or "未載入"
-                row["法人共振"] = row.get("法人共振", "未載入") or "未載入"
-                row["法人摘要"] = "法人資料未載入；需要時再手動開啟。"
+            # 三大法人資料已在搜尋/自動挑股時預先補入，此 toggle 改為顯示偵錯面板
+            show_inst_debug = st.toggle("顯示法人偵錯面板", value=False, key=f"load_inst_{st.session_state.selected_code}")
+            row = pd.Series(dict(row))
+            # 若預先補入的資料仍為「未載入」（例如舊版快照），補一次
+            if str(row.get("法人方向", "")) in ("", "未載入", "None"):
+                try:
+                    row = pd.Series(resolve_institutional_context(
+                        st.session_state.selected_code, row, fetch_institutional_bundle_all()
+                    ))
+                except Exception:
+                    row["法人方向"] = "資料不足"
+                    row["法人共振"] = "中性"
+                    row["法人摘要"] = "三大法人資料不足"
             st.markdown("#### 核心摘要")
             def _fmt_row(key):
                 v = row.get(key)
@@ -8399,8 +9331,8 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
                 "法人佔成交量比_parsed": safe_float_or_none(row.get("法人佔成交量比%", None)),
             }
             st.caption(row.get("法人摘要", "三大法人資料不足，暫不納入籌碼判讀。"))
-            with st.expander("法人抓取偵錯面板", expanded=(load_inst and str(row.get("法人方向", "")) == "資料不足")):
-                debug_rows = fetch_institutional_bundle_all().get("debug", []) if load_inst else []
+            with st.expander("法人抓取偵錯面板", expanded=(show_inst_debug and str(row.get("法人方向", "")) == "資料不足")):
+                debug_rows = fetch_institutional_bundle_all().get("debug", []) if show_inst_debug else []
                 hit_code = "是" if str(row.get("法人命中代碼", "否")) == "是" else "否"
                 d1, d2, d3 = st.columns(3)
                 d1.metric("本股代碼", str(st.session_state.selected_code or "").split(".")[0])
@@ -8499,37 +9431,58 @@ def render_single_stock_detail_panel(select_source: pd.DataFrame, df_result: pd.
             with _hdr_r:
                 st.caption("目前顯示：**做多策略**" if _side == "long" else "目前顯示：**做空策略**")
 
+            def _fmt_price_with_delta(price_val, close_val):
+                """回傳 (價格字串, delta字串)，delta 顯示距現價百分比（+漲/-跌）。"""
+                try:
+                    p = float(price_val)
+                    if p <= 0:
+                        return "--", None
+                    price_str = f"{p:.2f}"
+                    if close_val and close_val > 0:
+                        pct = (p - close_val) / close_val * 100
+                        delta_str = f"{pct:+.1f}%"
+                    else:
+                        delta_str = None
+                    return price_str, delta_str
+                except (TypeError, ValueError):
+                    return "--", None
+
+            _close_val = _safe_float(row.get("收盤"))
+
             if _side == "long":
                 with st.expander("做多策略", expanded=True):
                     long_pairs = [
-                        ("多方短期支撐", _fmt_row("支撐")),
-                        ("多方短期壓力", _fmt_row("短期壓力")),
-                        ("多方建議進場", _fmt_row("進場")),
-                        ("多方停損", _fmt_row("停損")),
-                        ("多方中繼目標", _fmt_row("中繼目標")),
-                        ("多方突破目標", _fmt_row("突破目標")),
+                        ("多方短期支撐", "支撐"),
+                        ("多方短期壓力", "短期壓力"),
+                        ("多方建議進場", "進場"),
+                        ("多方停損",     "停損"),
+                        ("多方中繼目標", "中繼目標"),
+                        ("多方突破目標", "突破目標"),
                     ]
                     long_cols_per_row = 2 if st.session_state.mobile_mode else 3
                     for i in range(0, len(long_pairs), long_cols_per_row):
                         cols = st.columns(long_cols_per_row)
-                        for col, (label, value) in zip(cols, long_pairs[i:i+long_cols_per_row]):
-                            col.metric(label, value)
+                        for col, (label, row_key) in zip(cols, long_pairs[i:i+long_cols_per_row]):
+                            val_str, delta_str = _fmt_price_with_delta(row.get(row_key), _close_val)
+                            col.metric(label, val_str, delta=delta_str, delta_color="normal")
+                    st.caption("中繼目標＝進場到短壓55%處（日內可達）；突破目標＝短壓上方0.4 ATR（突破後追）。均已限制在漲停板98%內。")
             else:
                 with st.expander("做空策略", expanded=True):
                     short_pairs = [
-                        ("空方短期壓力", f'{float(row.get("空方短期壓力", 0) or 0):.2f}' if row.get("空方短期壓力", "") != "" else "--"),
-                        ("空方短期支撐", f'{float(row.get("空方短期支撐", 0) or 0):.2f}' if row.get("空方短期支撐", "") != "" else "--"),
-                        ("空方建議進場", f'{float(row.get("空方建議進場", 0) or 0):.2f}' if row.get("空方建議進場", "") != "" else "--"),
-                        ("空方停損", f'{float(row.get("空方停損", 0) or 0):.2f}' if row.get("空方停損", "") != "" else "--"),
-                        ("空方中繼目標", f'{float(row.get("空方中繼目標", 0) or 0):.2f}' if row.get("空方中繼目標", "") != "" else "--"),
-                        ("空方跌破目標", f'{float(row.get("空方跌破目標", 0) or 0):.2f}' if row.get("空方跌破目標", "") != "" else "--")
+                        ("空方短期壓力", "空方短期壓力"),
+                        ("空方短期支撐", "空方短期支撐"),
+                        ("空方建議進場", "空方建議進場"),
+                        ("空方停損",     "空方停損"),
+                        ("空方中繼目標", "空方中繼目標"),
+                        ("空方跌破目標", "空方跌破目標"),
                     ]
                     short_cols_per_row = 2 if st.session_state.mobile_mode else 3
                     for i in range(0, len(short_pairs), short_cols_per_row):
                         cols = st.columns(short_cols_per_row)
-                        for col, (label, value) in zip(cols, short_pairs[i:i+short_cols_per_row]):
-                            col.metric(label, value)
-                    st.caption("空方策略正式版：已將空方短期壓力、建議進場、停損、中繼目標與跌破目標限制在次日可交易邊界內，避免偏波段過寬數值。")
+                        for col, (label, row_key) in zip(cols, short_pairs[i:i+short_cols_per_row]):
+                            val_str, delta_str = _fmt_price_with_delta(row.get(row_key), _close_val)
+                            col.metric(label, val_str, delta=delta_str, delta_color="inverse")
+                    st.caption("空方策略：已將壓力、進場、停損、中繼目標與跌破目標限制在次日可交易邊界內，避免偏波段過寬數值。")
 
             render_reason_block(row, "本檔判斷理由")
 
@@ -8662,20 +9615,18 @@ if st.session_state.current_page == "分析中心":
         st.rerun()
     jump_c2.info("整體市場總覽、官方補資料狀態、類股與排行預覽都集中在市場儀表板頁。")
     market_info = market_filter()
+    st.session_state["market_info_cache"] = market_info  # 供 topbar 取用
 
-    if st.session_state.mobile_mode:
+    c_title, c_mkt1, c_mkt2 = st.columns([3, 1.5, 1.5])
+    with c_title:
         st.markdown("### 市場概況")
-        st.toggle("手機精簡版", key="mobile_mode")
-    else:
-        top_a, top_b = st.columns([3, 1])
-        with top_a:
-            st.markdown("### 市場概況")
-        with top_b:
-            st.toggle("手機精簡版", key="mobile_mode")
-
-    mc1, mc2 = st.columns(2)
-    mc1.metric("大盤濾網", market_info["label"])
-    mc2.metric("加權指數", f'{market_info["close"]:.2f}' if market_info["close"] else "N/A")
+    c_mkt1.metric("大盤濾網", market_info["label"])
+    c_mkt2.metric("加權指數", f'{market_info["close"]:.2f}' if market_info["close"] else "N/A")
+    if market_info.get("taiex_static_caption"):
+        st.markdown(market_info["taiex_static_caption"])
+    if market_info.get("taiex_hint"):
+        st.caption(market_info["taiex_hint"])
+    render_market_taiex_diagnostics(market_info)
     st.info(market_info["text"])
 
     with st.container(border=True):
@@ -8721,6 +9672,7 @@ if st.session_state.current_page == "分析中心":
             if item is not None:
                 item["策略模式"] = "手動分析"
                 tmp.append(item)
+        tmp = enrich_with_institutional(tmp)
         tmp = sorted(tmp, key=lambda x: x["_rank"], reverse=True)
         st.session_state.results_data = tmp
         st.session_state.selected_code = tmp[0]["_code"] if tmp else None
@@ -8805,6 +9757,12 @@ if st.session_state.current_page == "分析中心":
             }
             source_candidates = liquidity_passed
 
+            # ── 補三大法人資料（在評分之前）──────────────────────────────────
+            # short_pick_compute / long_pick_compute 的「籌碼分」直接讀
+            # item["法人方向"] / item["法人共振"]，必須在評分前補好
+            source_candidates = enrich_with_institutional(source_candidates)
+            # ─────────────────────────────────────────────────────────────────
+
             engine_debug = dict(engine_debug)
             engine_debug["liquidity_passed_count"] = len(liquidity_passed)
             engine_debug["liquidity_raw_count"] = len(raw_candidates)
@@ -8813,7 +9771,7 @@ if st.session_state.current_page == "分析中心":
             st.session_state.last_auto_pick_quality_blocked = qc_blocked
             st.session_state.last_auto_pick_quality_message = qc_msg if qc_blocked else ""
 
-            with st.expander("自動挑股本輪資料面板（點標題可收合）", expanded=True):
+            with st.expander("自動挑股本輪資料面板（點標題可收合）", expanded=False):
                 with st.container(border=True):
                     render_auto_pick_engine_panel(engine_debug)
 
@@ -8839,7 +9797,7 @@ if st.session_state.current_page == "分析中心":
             elif not source_candidates:
                 st.warning("本次候選池全部被盤前流動性門檻排除，請放寬條件或改用手動搜尋。")
                 liq_summary = st.session_state.get("last_liquidity_summary", {}) or {}
-                with st.expander("查看盤前流動性排除偵錯", expanded=True):
+                with st.expander("查看盤前流動性排除偵錯", expanded=False):
                     dm1, dm2, dm3 = st.columns(3)
                     dm1.metric("候選池分析數", liq_summary.get("raw_count", 0))
                     dm2.metric("通過流動性門檻", liq_summary.get("passed_count", 0))
@@ -8959,7 +9917,8 @@ if st.session_state.current_page == "分析中心":
                     st.session_state.last_auto_pick_formal_count = 0
                     st.session_state.last_auto_pick_backup_count = len(fb)
                 else:
-                    st.session_state.results_data = candidates[:top_n]
+                    final_candidates = candidates[:top_n]
+                    st.session_state.results_data = final_candidates
                     st.session_state.selected_code = st.session_state.results_data[0]["_code"] if st.session_state.results_data else None
                     st.session_state.last_auto_pick_formal_count = len(st.session_state.results_data)
                     st.session_state.last_auto_pick_backup_count = 0
@@ -9397,15 +10356,12 @@ if st.session_state.current_page == "市場儀表板":
     st.markdown('<div class="main-shell"><h3>📊 市場儀表板</h3><p>正式版市場總覽頁：集中顯示大盤快照、官方補資料狀態與分析結果聚合模組，視覺也開始往全站一致化靠攏。</p></div>', unsafe_allow_html=True)
     st.caption(f"目前使用者：{st.session_state.current_user}")
     market_info = market_filter()
+    st.session_state["market_info_cache"] = market_info
 
     if "dashboard_last_update" not in st.session_state:
         st.session_state.dashboard_last_update = None
 
-    top_a, top_b = st.columns([3, 1])
-    with top_a:
-        st.markdown("### 市場概況")
-    with top_b:
-        st.toggle("手機精簡版", key="mobile_mode")
+    st.markdown("### 市場概況")
 
     action_c1, action_c2, action_c3 = st.columns([1.2, 1.2, 3])
     if action_c1.button("重新整理儀表板", use_container_width=True):
@@ -9426,6 +10382,11 @@ if st.session_state.current_page == "市場儀表板":
     mc1, mc2 = st.columns(2)
     mc1.metric("大盤濾網", market_info["label"])
     mc2.metric("加權指數", f'{market_info["close"]:.2f}' if market_info["close"] else "N/A")
+    if market_info.get("taiex_static_caption"):
+        st.markdown(market_info["taiex_static_caption"])
+    if market_info.get("taiex_hint"):
+        st.caption(market_info["taiex_hint"])
+    render_market_taiex_diagnostics(market_info)
     st.info(market_info["text"])
 
     with st.container(border=True):
@@ -9440,6 +10401,10 @@ if st.session_state.current_page == "市場儀表板":
         vol_last = None
         if df_mkt is not None and not df_mkt.empty:
             try:
+                ad = market_info.get("taiex_anchor_date")
+                res_close = market_info.get("close")
+                if ad is not None and res_close is not None:
+                    df_mkt = _ensure_twii_bar_through_anchor(df_mkt, ad, float(res_close))
                 df_mkt2 = indicators(df_mkt.copy())
                 if len(df_mkt2) >= 2:
                     prev_close = float(df_mkt2["Close"].iloc[-2])
@@ -9840,6 +10805,7 @@ if st.session_state.current_page == "快照中心":
 
     results = st.session_state.results_data
     market_info = market_filter()
+    st.session_state["market_info_cache"] = market_info
     snapshots = load_snapshots()
     df_snap = pd.DataFrame(snapshots) if snapshots else pd.DataFrame()
 
