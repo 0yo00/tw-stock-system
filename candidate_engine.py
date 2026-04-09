@@ -1,4 +1,5 @@
 import re
+import math
 import pandas as pd
 
 
@@ -16,8 +17,11 @@ def market_bias(df: pd.DataFrame):
 
 
 def breakout_analysis(df: pd.DataFrame, resistance: float):
-    close = float(df["Close"].iloc[-1]); high = float(df["High"].iloc[-1]); open_ = float(df["Open"].iloc[-1])
-    vol = float(df["Volume"].iloc[-1]); vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
+    close = float(df["Close"].iloc[-1])
+    high = float(df["High"].iloc[-1])
+    open_ = float(df["Open"].iloc[-1])
+    vol = float(df["Volume"].iloc[-1])
+    vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
     closed_above = close > resistance * 1.002
     intraday_break = high > resistance * 1.002
     strong_volume = vol > vol5 * 1.2 if vol5 > 0 else False
@@ -33,11 +37,13 @@ def breakout_analysis(df: pd.DataFrame, resistance: float):
 
 
 def calculate_score(df: pd.DataFrame):
-    close = float(df["Close"].iloc[-1]); prev5 = float(df["Close"].iloc[-5]) if len(df) >= 5 else close
+    close = float(df["Close"].iloc[-1])
+    prev5 = float(df["Close"].iloc[-5]) if len(df) >= 5 else close
     prev10 = float(df["Close"].iloc[-10]) if len(df) >= 10 else close
     ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
     ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else close
-    vol = float(df["Volume"].iloc[-1]); vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
+    vol = float(df["Volume"].iloc[-1])
+    vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
     rsi = float(df["rsi"].iloc[-1]) if pd.notna(df["rsi"].iloc[-1]) else 50
     k = float(df["k"].iloc[-1]) if pd.notna(df["k"].iloc[-1]) else 50
     d = float(df["d"].iloc[-1]) if pd.notna(df["d"].iloc[-1]) else 50
@@ -117,9 +123,11 @@ def rank_reason(bucket: str, conclusion: str, signal: str) -> str:
 
 
 def build_reason(df: pd.DataFrame, breakout_status: str):
-    close = float(df["Close"].iloc[-1]); ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
+    close = float(df["Close"].iloc[-1])
+    ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
     ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else close
-    vol = float(df["Volume"].iloc[-1]); vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
+    vol = float(df["Volume"].iloc[-1])
+    vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
     rsi = float(df["rsi"].iloc[-1]) if pd.notna(df["rsi"].iloc[-1]) else 50
     k = float(df["k"].iloc[-1]) if pd.notna(df["k"].iloc[-1]) else 50
     d = float(df["d"].iloc[-1]) if pd.notna(df["d"].iloc[-1]) else 50
@@ -138,9 +146,13 @@ def build_reason(df: pd.DataFrame, breakout_status: str):
 def price_volume_analysis(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
-    close = float(last["Close"]); prev_close = float(prev["Close"])
-    open_ = float(last["Open"]); high = float(last["High"]); low = float(last["Low"])
-    vol = float(last["Volume"]); prev_vol = float(prev["Volume"]) if pd.notna(prev["Volume"]) else vol
+    close = float(last["Close"])
+    prev_close = float(prev["Close"])
+    open_ = float(last["Open"])
+    high = float(last["High"])
+    low = float(last["Low"])
+    vol = float(last["Volume"])
+    prev_vol = float(prev["Volume"]) if pd.notna(prev["Volume"]) else vol
     vol5 = float(df["vol5"].iloc[-1]) if "vol5" in df.columns and pd.notna(df["vol5"].iloc[-1]) else vol
 
     price_up = close > prev_close
@@ -167,7 +179,7 @@ def price_volume_analysis(df: pd.DataFrame):
     if price_down and vol_up:
         return "價跌量增", "紅燈", ["價格下跌且量能放大", "賣壓增強", "偏空解讀"]
     if price_down and vol_down:
-        return "價跌量縮", "黃燈", ["價格回落但量能收斂", "弱勢整理或跌勢暫緩", "等待下一步方向"]
+        return "價跌量縮", "黃燈", ["價格回落且量能收斂", "偏空但動能不足／跌勢可能趨緩", "空方當沖不宜作主要依據，宜觀察"]
 
     if gap_down and price_down:
         return "跳空下跌", "紅燈", ["開盤跳空轉弱", "市場承接偏弱", "先保守看待"]
@@ -176,7 +188,6 @@ def price_volume_analysis(df: pd.DataFrame):
 
 
 def _safe_float(val, default=0.0):
-    import math
     try:
         f = float(val) if val is not None and val != "" else default
         return default if math.isnan(f) or math.isinf(f) else f
@@ -202,11 +213,11 @@ def build_short_strategy(row: dict):
     short_resistance = resistance if resistance > 0 else close
     short_support = support if support > 0 else close
 
-    if str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空":
-        if short_resistance > 0 and close > 0 and abs(short_resistance - close) / max(close, 1) <= 0.03:
-            short_entry = close
-        else:
-            short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
+    # 空方且接近壓力時直接以現價進場，其餘情況一律取現價與壓力中間點
+    if (str(row.get("操作評級", "")) == "空方" or str(row.get("結論", "")) == "看空") \
+            and short_resistance > 0 and close > 0 \
+            and abs(short_resistance - close) / max(close, 1) <= 0.03:
+        short_entry = close
     else:
         short_entry = round((close + short_resistance) / 2, 2) if short_resistance > close > 0 else close
 
@@ -252,12 +263,15 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
 
     close = round(float(df["Close"].iloc[-1]), 2)
 
-    high5 = float(df["High"].tail(5).max()); low5 = float(df["Low"].tail(5).min())
-    high10 = float(df["High"].tail(10).max()); low10 = float(df["Low"].tail(10).min())
+    high5 = float(df["High"].tail(5).max())
+    low5 = float(df["Low"].tail(5).min())
+    high10 = float(df["High"].tail(10).max())
+    low10 = float(df["Low"].tail(10).min())
     ma5 = float(df["ma5"].iloc[-1]) if pd.notna(df["ma5"].iloc[-1]) else close
     ma20 = float(df["ma20"].iloc[-1]) if pd.notna(df["ma20"].iloc[-1]) else close
     atr = float(df["atr"].iloc[-1]) if pd.notna(df["atr"].iloc[-1]) else max(close * 0.02, 0.5)
-    vol = float(df["Volume"].iloc[-1]); vol_prev = float(df["Volume"].iloc[-2]) if len(df) >= 2 else vol
+    vol = float(df["Volume"].iloc[-1])
+    vol_prev = float(df["Volume"].iloc[-2]) if len(df) >= 2 else vol
     vol5 = float(df["vol5"].iloc[-1]) if pd.notna(df["vol5"].iloc[-1]) else vol
     k = float(df["k"].iloc[-1]) if pd.notna(df["k"].iloc[-1]) else 50
     d = float(df["d"].iloc[-1]) if pd.notna(df["d"].iloc[-1]) else 50
@@ -267,32 +281,49 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
     support = max(support_candidates) if support_candidates else max([x for x in [low5, low10, ma5, ma20] if x < close] or [close * 0.96])
     resistance_candidates = [x for x in [high5, high10] if x > close and x < close * 1.12]
     resistance = min(resistance_candidates) if resistance_candidates else close + atr * 0.8
-    breakout_base = max(high10, resistance)
-    mid_target = breakout_base + atr * 0.8
-    final_target = breakout_base + atr * 1.6
 
-    support = round(float(support), 2); resistance = round(float(resistance), 2)
-    mid_target = round(float(mid_target), 2); final_target = round(float(final_target), 2); atr = round(float(atr), 2)
+    support = round(float(support), 2)
+    resistance = round(float(resistance), 2)
+    atr = round(float(atr), 2)
 
     breakout_status, breakout_strength, chase = breakout_analysis(df, resistance)
     score = max(0, calculate_score(df) + market_adj)
     bias = market_bias(df)
 
-    dist_support_pct = (close - support) / close if close else 0
-    dist_resist_pct = (resistance - close) / close if close else 0
+    # ── 當沖六項策略（以日內 ATR 為基準，目標不超漲停板）─────────────────
+    # 漲停板安全上限（預留 2% 安全邊際避免貼板無法成交）
+    limit_up_cap = close * 1.10 * 0.98
+
+    # 進場：極貼近現價（0.12 ATR ≈ -0.3%），當沖必須快進
     if breakout_status == "已突破":
-        entry = close * 0.996
-    elif dist_resist_pct <= 0.03:
-        entry = max(support + atr * 0.35, close - atr * 0.45)
-    elif dist_support_pct <= 0.03:
-        entry = support + atr * 0.2
+        entry = round(close * 0.999, 2)
     else:
-        entry = max(support + atr * 0.3, close - atr * 0.35)
-    entry = round(float(min(entry, close * 0.995)), 2)
-    stop = round(float(support - atr * 0.25), 2)
+        entry = round(close - atr * 0.12, 2)
+    entry = min(entry, round(close * 0.997, 2))
+
+    # 停損：緊（0.30 ATR ≈ -0.8%），並保護不低於支撐 - 0.10 ATR
+    stop = round(entry - atr * 0.30, 2)
+    stop = max(stop, round(support - atr * 0.10, 2))
     if stop >= entry:
-        stop = round(entry - max(atr * 0.25, 0.01), 2)
+        stop = round(entry - max(atr * 0.15, close * 0.004, 0.01), 2)
+
+    # 短期壓力（目標 1）：近期高點，是進出的關鍵參考
     short_target = resistance
+
+    # 中繼目標（目標 2）：進場到壓力 60%，至少 +2.5%，上限 +5%
+    raw_mid = entry + (resistance - entry) * 0.60
+    mid_floor = entry * 1.025
+    mid_target = round(max(mid_floor, min(raw_mid, entry * 1.05, limit_up_cap)), 2)
+
+    # 突破目標（目標 3）：壓力上方 0.35 ATR，上限 +8%
+    raw_final = resistance + atr * 0.35
+    final_target = round(min(raw_final, entry * 1.08, limit_up_cap), 2)
+
+    # 遞增保護（避免因 cap 造成順序錯亂）
+    mid_target   = max(mid_target,   round(entry + (short_target - entry) * 0.30, 2))
+    final_target = max(final_target, round(mid_target + atr * 0.10, 2))
+    # ─────────────────────────────────────────────────────────────────────────
+
     rr = max(0.0, round((short_target - entry) / max(entry - stop, 0.01), 2))
 
     star, action_label = decision_star_and_action(score, breakout_status, breakout_strength, rr, bias)
@@ -364,8 +395,8 @@ def analyze_one(raw_stock: str, market_adj: int, name_map: dict, resolve_symbol,
         }),
         "選股理由": reason,
         "摘要1": f"位置評語：現價距短撐約 {dist_support}% ，距短壓約 {dist_resistance}% 。",
-        "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，風報比 {rr}。",
-        "摘要3": f"量價評語：{vol_trend} {vol_change_pct:+.2f}% ，若有效突破短壓，突破後目標空間約 {dist_target}% 。",
+        "摘要2": f"策略評語：短線結論偏{conclusion}，交易訊號為 {signal} ，建議進場 {entry:.2f} ，中繼目標 {mid_target:.2f} ，風報比 {rr}。",
+        "摘要3": f"量價評語：{vol_trend} {vol_change_pct:+.2f}% ，日內中繼空間約 {round((mid_target-entry)/entry*100,1) if entry else 0}%，有效突破短壓後延伸目標約 {dist_target}% 。",
         "_code": resolved_code, "_rank": rank,
     }
 
